@@ -1,0 +1,26 @@
+-don't remove from any edge bordering a face bead with 6 or fewer beads
+-check collision along outside face (makes bugs when treelike)
+-tension threshold around 5.8 is okay
+-all face beads collision mode by default
+-alternatively, implement bounding-box heirarchy based collisions
+-revert button to go back to original grid drawing
+-vertex cycles are not floating with the vertex beads
+-edge has a cooldown period after a bead removal? to prevent tangles at "outside corners"
+-add edges back into consideration after they have cooled down for a while, even if they got stuck earlier? (multiple autotightens in a row seem fine)
+-remove beads from the middle of edges
+
+
+-60 degree angle of edge bead adjacent to vertex bug:
+(-1,68,-77,67)(1,-4,2,-74)(-2,6,-90,5)(-3,84,-47,83)(3,-8,4,-67)(-5,73,-57,74)(-6,8,-83,7)(-7,89,-61,90)(-9,40,-86,39)(9,-14,10,-38)(-10,12,-54,11)(-11,37,-42,38)(-12,14,-79,13)(-13,53,-56,54)(-15,30,-66,29)(15,-18,16,-34)(-16,20,-71,19)(-17,72,-88,71)(17,-20,18,-29)(-19,79,-23,80)(-21,50,-35,49)(21,-26,22,-48)(-22,24,-82,23)(-24,26,-49,25)(-25,81,-33,82)(-27,44,-78,43)(27,-32,28,-50)(-28,36,-81,35)(-30,32,-43,31)(-31,65,-68,66)(33,-36,34,-80)(-37,56,-87,55)(-39,59,-58,60)(-40,42,-55,41)(-41,85,-69,86)(-44,46,-84,45)(-45,77,-65,78)(-46,48,-51,47)(51,-52,52,-63)(-53,88,-75,87)(57,-62,58,-70)(-59,69,-76,70)(-60,64,-89,63)(61,-64,62,-73)(-72,76,-85,75)
+infinite face: (9,39,60,63....)
+-also check if the degree angle check only happens at the very beginning of the autotighten, or each frame
+-infinite face (52) gives the bug above, as well as another one.
+
+a tree that witnesses honeycomb bug:
+(-1,3,-6,4)(1,-2,2,-16)(-3,18,-30,17)(-4,6,-37,5)(-5,13,-12,14)(-7,12,-36,11)(7,-10,8,-14)(-8,10,-33,9)(-9,33,-31,34)(-11,36,-35,35)(-13,37,-38,38)(-15,19,-22,20)(15,-18,16,-19)(-17,30,-29,29)(-20,22,-26,21)(-21,24,-23,23)(-24,28,-27,27)(-25,25,-28,26)(31,-32,32,-34)
+inf face (-23)
+
+A good one to witness the optimization on when to run RebuildStructures
+(-1,22,-7,21)(1,-6,2,-20)(-2,4,-24,3)(-3,19,-22,20)(-4,6,-21,5)(-5,9,-10,10)(7,-8,8,-13)(-9,13,-16,14)(-11,23,-19,24)(11,-12,12,-17)(-14,16,-23,15)(-15,17,-18,18)
+inf face (-8)
+
