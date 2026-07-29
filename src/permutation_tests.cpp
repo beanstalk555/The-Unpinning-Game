@@ -155,6 +155,35 @@ bool RunPermutationTests()
                   "R3: crossing count preserved");
             Check(moved.faces.size() == loop.faces.size(), "R3: face count preserved");
             Check(moved.numStrands == loop.numStrands, "R3: strand count preserved");
+            // Strand colors: after rematch in FinalizeR3 the Multiloop ctor's
+            // IDs may differ, but ComputeR3Sigma alone doesn't rematch. Check
+            // that each old strand still has a unique best-overlap partner
+            // (so rematch is well-defined).
+            {
+                std::vector<int> bestNew(loop.numStrands, -1);
+                std::vector<int> bestOv(loop.numStrands, -1);
+                for (int os = 0; os < loop.numStrands; ++os) {
+                    for (int ns = 0; ns < moved.numStrands; ++ns) {
+                        int ov = 0;
+                        for (int k = 1; k <= loop.numEdges; ++k) {
+                            if (loop.strandOfEdge[k] == os && moved.strandOfEdge[k] == ns) {
+                                ++ov;
+                            }
+                        }
+                        if (ov > bestOv[os]) {
+                            bestOv[os] = ov;
+                            bestNew[os] = ns;
+                        }
+                    }
+                }
+                std::set<int> used;
+                bool unique = true;
+                for (int os = 0; os < loop.numStrands; ++os) {
+                    unique = unique && bestNew[os] >= 0 && bestOv[os] > 0 &&
+                             used.insert(bestNew[os]).second;
+                }
+                Check(unique, "R3: strand rematch by max overlap is unique");
+            }
 
             // The central triangle survives with the same half-edge set.
             const std::set<int> want(info.h, info.h + 3);
@@ -430,6 +459,37 @@ bool RunPermutationTests()
                         physicsOk = false;
                     }
                     Check(physicsOk, "R3 end-to-end: physics rebuilds on the moved diagram");
+
+                    // Strand colors stay matched to the pre-move assignment.
+                    bool colorsStable = true;
+                    for (int k = 1; k <= loop.numEdges; ++k) {
+                        // After rematch, each edge keeps its old strand id iff
+                        // it stayed in that component; otherwise it takes the
+                        // id of the component it joined. Verify rematch ran:
+                        // every strand id in use is in [0, numStrands).
+                        const int s = moved->strandOfEdge[k];
+                        if (s < 0 || s >= moved->numStrands) {
+                            colorsStable = false;
+                        }
+                    }
+                    // Max-overlap rematch: majority of each old strand's edges
+                    // should still carry that strand's id.
+                    for (int os = 0; os < loop.numStrands; ++os) {
+                        int keep = 0, total = 0;
+                        for (int k = 1; k <= loop.numEdges; ++k) {
+                            if (loop.strandOfEdge[k] != os) {
+                                continue;
+                            }
+                            ++total;
+                            if (moved->strandOfEdge[k] == os) {
+                                ++keep;
+                            }
+                        }
+                        if (keep * 2 < total) {
+                            colorsStable = false;
+                        }
+                    }
+                    Check(colorsStable, "R3 end-to-end: strand colors preserved by rematch");
                 }
             }
         }

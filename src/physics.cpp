@@ -116,20 +116,78 @@ std::vector<int> Physics::WalkEdge(int edge) const
     int cur = neck_->NeighborToward(vStart, edge);
     int guard = 0;
     const int limit = BeadCount() + 8;
-    while (cur >= 0 && !neck_->beads[cur].isVertex) {
+    while (cur >= 0 && !neck_->beads[static_cast<size_t>(cur)].isVertex) {
+        if (neck_->beads[static_cast<size_t>(cur)].removed) {
+            break; // broken link into a removed bead
+        }
         chain.push_back(cur);
-        const Bead& b = neck_->beads[cur];
+        const Bead& b = neck_->beads[static_cast<size_t>(cur)];
         const int nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+        if (nxt == prev) {
+            break; // both neighbors equal (degenerate loop bead)
+        }
         prev = cur;
         cur = nxt;
         if (++guard > limit) {
             break; // safety against a malformed link
         }
     }
-    if (cur >= 0) {
+    if (cur >= 0 && neck_->beads[static_cast<size_t>(cur)].isVertex) {
         chain.push_back(cur); // tail vertex bead
     }
     return chain;
+}
+
+bool Physics::EdgeIsLoop(int edge) const
+{
+    const auto itPos = crossingOf_.find(edge);
+    const auto itNeg = crossingOf_.find(-edge);
+    return itPos != crossingOf_.end() && itNeg != crossingOf_.end() &&
+           itPos->second == itNeg->second;
+}
+
+bool Physics::NodeReferences(int node, int target) const
+{
+    if (node < 0 || node >= BeadCount() || target < 0) {
+        return false;
+    }
+    const Bead& b = neck_->beads[static_cast<size_t>(node)];
+    if (b.removed) {
+        return false;
+    }
+    if (b.isVertex) {
+        for (int i = 0; i < 4; ++i) {
+            if (b.neighborOfHalfEdge[i] == target) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return b.neighbors[0] == target || b.neighbors[1] == target;
+}
+
+int Physics::CountReferences(int node, int target) const
+{
+    if (node < 0 || node >= BeadCount()) {
+        return 0;
+    }
+    const Bead& b = neck_->beads[static_cast<size_t>(node)];
+    int count = 0;
+    if (b.isVertex) {
+        for (int i = 0; i < 4; ++i) {
+            if (b.neighborOfHalfEdge[i] == target) {
+                ++count;
+            }
+        }
+    }
+    else {
+        for (int i = 0; i < 2; ++i) {
+            if (b.neighbors[i] == target) {
+                ++count;
+            }
+        }
+    }
+    return count;
 }
 
 void Physics::RebuildSpringsFromChains()
@@ -141,7 +199,18 @@ void Physics::RebuildSpringsFromChains()
         const std::vector<int>& chain = chains_[k];
         std::vector<std::pair<int, int>>& es = edgeSprings_[static_cast<size_t>(k)];
         for (size_t i = 0; i + 1 < chain.size(); ++i) {
-            es.push_back({chain[i], chain[i + 1]});
+            const int a = chain[i];
+            const int b = chain[i + 1];
+            if (a == b) {
+                continue;
+            }
+            if (a < BeadCount() && neck_->beads[static_cast<size_t>(a)].removed) {
+                continue;
+            }
+            if (b < BeadCount() && neck_->beads[static_cast<size_t>(b)].removed) {
+                continue;
+            }
+            es.push_back({a, b});
         }
     }
     FlattenSpringsFromEdges();
@@ -152,14 +221,26 @@ void Physics::RefreshEdgeSprings(int edge)
     if (edge < 1 || edge > loop_->numEdges) {
         return;
     }
+    // Grow without wiping existing per-edge spring lists (assign would clear them).
     if (static_cast<int>(edgeSprings_.size()) < loop_->numEdges + 1) {
-        edgeSprings_.assign(loop_->numEdges + 1, {});
+        edgeSprings_.resize(static_cast<size_t>(loop_->numEdges + 1));
     }
     const std::vector<int>& chain = chains_[edge];
     std::vector<std::pair<int, int>>& es = edgeSprings_[static_cast<size_t>(edge)];
     es.clear();
     for (size_t i = 0; i + 1 < chain.size(); ++i) {
-        es.push_back({chain[i], chain[i + 1]});
+        const int a = chain[i];
+        const int b = chain[i + 1];
+        if (a == b) {
+            continue;
+        }
+        if (a < BeadCount() && neck_->beads[static_cast<size_t>(a)].removed) {
+            continue;
+        }
+        if (b < BeadCount() && neck_->beads[static_cast<size_t>(b)].removed) {
+            continue;
+        }
+        es.push_back({a, b});
     }
     FlattenSpringsFromEdges();
 }
@@ -323,7 +404,7 @@ void Physics::RefreshEdgeChain(int edge)
         return;
     }
     if (static_cast<int>(chains_.size()) < loop_->numEdges + 1) {
-        chains_.assign(loop_->numEdges + 1, {});
+        chains_.resize(static_cast<size_t>(loop_->numEdges + 1));
     }
     chains_[edge] = WalkEdge(edge);
 }
@@ -656,36 +737,96 @@ void Physics::ReplaceNeighbor(int node, int oldNeighbor, int newNeighbor)
     }
 }
 
+// Like ReplaceNeighbor, but only updates the first matching slot. Needed when
+// reinserting into a kink (loop edge): both +k and -k at the shared vertex
+// may temporarily point at the same bead, and blindly rewriting every match
+// collapses the two ends of the loop onto one neighbor.
+void Physics::ReplaceNeighborOnce(int node, int oldNeighbor, int newNeighbor)
+{
+    Bead& b = neck_->beads[node];
+    if (b.isVertex) {
+        for (int i = 0; i < 4; ++i) {
+            if (b.neighborOfHalfEdge[i] == oldNeighbor) {
+                b.neighborOfHalfEdge[i] = newNeighbor;
+                return;
+            }
+        }
+    }
+    else {
+        for (int i = 0; i < 2; ++i) {
+            if (b.neighbors[i] == oldNeighbor) {
+                b.neighbors[i] = newNeighbor;
+                return;
+            }
+        }
+    }
+}
+
 void Physics::ReinsertEdgeBead(int bead, int neighborA, int neighborC)
 {
-    Bead& b = neck_->beads[bead];
+    if (bead < 0 || bead >= BeadCount() || neighborA < 0 || neighborC < 0 ||
+        neighborA == neighborC || neighborA >= BeadCount() || neighborC >= BeadCount()) {
+        return;
+    }
+    // A and C must still be linked to each other; otherwise splicing would
+    // create a one-way orphan (the failure mode behind floating kink beads).
+    if (!NodeReferences(neighborA, neighborC) || !NodeReferences(neighborC, neighborA)) {
+        return;
+    }
+    if (CountReferences(neighborA, neighborC) != 1 ||
+        CountReferences(neighborC, neighborA) != 1) {
+        return;
+    }
+    Bead& b = neck_->beads[static_cast<size_t>(bead)];
     const Vector2 pa = PosOf(neighborA);
     const Vector2 pc = PosOf(neighborC);
     b.removed = false;
     b.pos = {(pa.x + pc.x) * 0.5f, (pa.y + pc.y) * 0.5f};
     b.neighbors[0] = neighborA;
     b.neighbors[1] = neighborC;
-    ReplaceNeighbor(neighborA, neighborC, bead);
-    ReplaceNeighbor(neighborC, neighborA, bead);
-    if (bead >= 0 && bead < static_cast<int>(vel_.size())) {
-        vel_[bead] = Vector2{0.0f, 0.0f};
+    ReplaceNeighborOnce(neighborA, neighborC, bead);
+    ReplaceNeighborOnce(neighborC, neighborA, bead);
+    if (bead < static_cast<int>(vel_.size())) {
+        vel_[static_cast<size_t>(bead)] = Vector2{0.0f, 0.0f};
     }
     structureDirty_ = true;
 }
 
 void Physics::RemoveEdgeBead(int bead)
 {
-    Bead& b = neck_->beads[bead];
+    if (bead < 0 || bead >= BeadCount()) {
+        return;
+    }
+    Bead& b = neck_->beads[static_cast<size_t>(bead)];
+    if (b.removed || b.isVertex) {
+        return;
+    }
     const int a = b.neighbors[0];
     const int c = b.neighbors[1];
-    ReplaceNeighbor(a, bead, c);
-    ReplaceNeighbor(c, bead, a);
+    // Last bead on a loop edge has neighbors (v, v). Splicing that out
+    // would write the vertex's own index into its neighbor slots.
+    if (a == c || a < 0 || c < 0) {
+        return;
+    }
+    // Each endpoint must reference this bead in exactly one slot. Two slots
+    // (collapsed kink) or zero (already unlinked) means refuse.
+    if (CountReferences(a, bead) != 1 || CountReferences(c, bead) != 1) {
+        return;
+    }
+    ReplaceNeighborOnce(a, bead, c);
+    ReplaceNeighborOnce(c, bead, a);
     b.removed = true;
     structureDirty_ = true;
 }
 
 int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
 {
+    if (neighborA < 0 || neighborC < 0 || neighborA == neighborC ||
+        !NodeReferences(neighborA, neighborC) || !NodeReferences(neighborC, neighborA) ||
+        CountReferences(neighborA, neighborC) != 1 ||
+        CountReferences(neighborC, neighborA) != 1) {
+        return -1;
+    }
     for (int i = 0; i < BeadCount(); ++i) {
         Bead& slot = neck_->beads[static_cast<size_t>(i)];
         if (!slot.removed || slot.isVertex || slot.edge != edge) {
@@ -705,8 +846,8 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
     bead.neighbors[0] = neighborA;
     bead.neighbors[1] = neighborC;
     const int idx = BeadCount();
-    ReplaceNeighbor(neighborA, neighborC, idx);
-    ReplaceNeighbor(neighborC, neighborA, idx);
+    ReplaceNeighborOnce(neighborA, neighborC, idx);
+    ReplaceNeighborOnce(neighborC, neighborA, idx);
     neck_->beads.push_back(std::move(bead));
     vel_.push_back(Vector2{0.0f, 0.0f});
     structureDirty_ = true;
@@ -993,7 +1134,12 @@ int Physics::RemoveBeadFromEdge(int edge, bool bendPassOnly, int* neighborA, int
     }
     const std::vector<int>& chain = chains_[edge];
     const int edgeBeads = static_cast<int>(chain.size()) - 2;
-    if (edgeBeads < 2) {
+    // Loop edges (both ends the same crossing) must keep at least two edge
+    // beads: reducing to one merges the +k/-k neighbor slots at that vertex
+    // and subsequent reinserts corrupt the chain into a cycle.
+    const bool loopEdge = EdgeIsLoop(edge);
+    const int minBeads = loopEdge ? 3 : 2;
+    if (edgeBeads < minBeads) {
         return -1;
     }
 
@@ -1005,7 +1151,13 @@ int Physics::RemoveBeadFromEdge(int edge, bool bendPassOnly, int* neighborA, int
                 const int bead = chain[i];
                 const int a = neck_->beads[bead].neighbors[0];
                 const int c = neck_->beads[bead].neighbors[1];
+                if (a == c) {
+                    continue;
+                }
                 RemoveEdgeBead(bead);
+                if (!neck_->beads[static_cast<size_t>(bead)].removed) {
+                    continue;
+                }
                 if (neighborA != nullptr) {
                     *neighborA = a;
                 }
@@ -1050,7 +1202,13 @@ int Physics::RemoveBeadFromEdge(int edge, bool bendPassOnly, int* neighborA, int
     }
     const int a = neck_->beads[bestBead].neighbors[0];
     const int c = neck_->beads[bestBead].neighbors[1];
+    if (a == c) {
+        return -1;
+    }
     RemoveEdgeBead(bestBead);
+    if (!neck_->beads[static_cast<size_t>(bestBead)].removed) {
+        return -1;
+    }
     if (neighborA != nullptr) {
         *neighborA = a;
     }
@@ -1147,13 +1305,22 @@ bool Physics::BeginRemovalRound()
             (k < static_cast<int>(struckEdges_.size()) && struckEdges_[k])) {
             continue;
         }
-        if (edgeBeadsRemaining[static_cast<size_t>(k)] < 2) {
+        const bool loopEdge = EdgeIsLoop(k);
+        const int minBeads = loopEdge ? 3 : 2;
+        if (edgeBeadsRemaining[static_cast<size_t>(k)] < minBeads) {
+            continue;
+        }
+        // Also refuse beads whose two neighbors are the same vertex.
+        if (neck_->beads[bead].neighbors[0] == neck_->beads[bead].neighbors[1]) {
             continue;
         }
         const float length = edgeLength(chains_[k]);
         const int a = neck_->beads[bead].neighbors[0];
         const int c = neck_->beads[bead].neighbors[1];
         RemoveEdgeBead(bead);
+        if (neck_->beads[bead].removed == false) {
+            continue; // RemoveEdgeBead refused (e.g. a == c)
+        }
         PendingEdge pending;
         pending.edge = k;
         pending.length = length;
@@ -1169,7 +1336,9 @@ bool Physics::BeginRemovalRound()
 
     const bool skipExcessCheck = !evaluateGeometry;
     for (const int k : excessEdges) {
-        if (edgeBeadsRemaining[static_cast<size_t>(k)] < 2) {
+        const bool loopEdge = EdgeIsLoop(k);
+        const int minBeads = loopEdge ? 3 : 2;
+        if (edgeBeadsRemaining[static_cast<size_t>(k)] < minBeads) {
             continue;
         }
         const float length = edgeLength(chains_[k]);
@@ -1196,9 +1365,10 @@ bool Physics::BeginRemovalRound()
     if (anyRemoval) {
         std::unordered_set<int> affectedFaces;
         for (const int k : edgesRemovedThisRound) {
-            RefreshEdgeSprings(k);
             AppendIncidentFaces(k, affectedFaces);
         }
+        // Full spring rebuild: safer than per-edge refresh after kink edits.
+        RebuildSpringsFromChains();
         for (const int f : affectedFaces) {
             WalkFaceBoundaryNoDots(f);
             RefreshFaceBody(f);
@@ -1237,9 +1407,19 @@ void Physics::StartAutoTighten()
 
 void Physics::StopAutoTighten()
 {
+    // Restore any beads that were removed but not yet settled, so cancelling
+    // mid-round cannot leave the necklace with dangling cuts.
+    for (const PendingEdge& pending : pendingEdges_) {
+        if (!pending.settled && pending.removedBead >= 0 &&
+            pending.removedBead < BeadCount() &&
+            neck_->beads[static_cast<size_t>(pending.removedBead)].removed) {
+            ReinsertEdgeBead(pending.removedBead, pending.neighborA, pending.neighborC);
+        }
+    }
     autoActive_ = false;
     needsGeometryEval_ = false;
     pendingEdges_.clear();
+    structureDirty_ = true;
 }
 
 void Physics::AutoStep()
@@ -1291,10 +1471,10 @@ void Physics::AutoStep()
             }
             for (const int k : reinsertedEdges) {
                 RefreshEdgeChain(k);
-                RefreshEdgeSprings(k);
                 RefreshFaceBodiesForEdge(k);
                 removedEdgesLastRound_.insert(k);
             }
+            RebuildSpringsFromChains();
             structureDirty_ = false;
             needsGeometryEval_ = true;
         }
@@ -1589,7 +1769,9 @@ void Physics::MaintainR3BranchSpacing()
                 continue;
             }
             const int inserted = InsertEdgeBeadBetween(chain[i], chain[i + 1], entry.first);
-            AddBeadToFrozenGroups(inserted, chain[i]);
+            if (inserted >= 0) {
+                AddBeadToFrozenGroups(inserted, chain[i]);
+            }
             break; // one insert per branch per frame
         }
     }

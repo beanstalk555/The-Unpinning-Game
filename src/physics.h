@@ -138,6 +138,11 @@ private:
     // Returns the (possibly recycled) bead index of the inserted bead.
     int InsertEdgeBeadBetween(int neighborA, int neighborC, int edge);
     void ReplaceNeighbor(int node, int oldNeighbor, int newNeighbor);
+    void ReplaceNeighborOnce(int node, int oldNeighbor, int newNeighbor);
+    bool NodeReferences(int node, int target) const;
+    int CountReferences(int node, int target) const;
+    // True when +edge and -edge meet at the same crossing (1-gon kink).
+    bool EdgeIsLoop(int edge) const;
 
     // Split consecutive pairs when center-to-center distance exceeds gapSize bead diameters.
     void MaintainBeadSpacingDuringDrag();

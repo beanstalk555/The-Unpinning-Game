@@ -225,6 +225,77 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
         return nullptr;
     }
 
+    // R3 redistributes a few edges among strands (the triangle sides trade
+    // components) and Multiloop assigns strand IDs by first-seen root, so the
+    // default numbering often permutes colors. Remap each new strand onto the
+    // old strand it overlaps most so colors stay stable for the bulk of each
+    // component.
+    {
+        struct StrandCand
+        {
+            int overlap;
+            int newStrand;
+            int oldStrand;
+        };
+        std::vector<StrandCand> strandCands;
+        for (int ns = 0; ns < newLoop->numStrands; ++ns) {
+            for (int os = 0; os < oldLoop.numStrands; ++os) {
+                int ov = 0;
+                for (int k = 1; k <= oldLoop.numEdges; ++k) {
+                    if (oldLoop.strandOfEdge[static_cast<size_t>(k)] == os &&
+                        newLoop->strandOfEdge[static_cast<size_t>(k)] == ns) {
+                        ++ov;
+                    }
+                }
+                if (ov > 0) {
+                    strandCands.push_back({ov, ns, os});
+                }
+            }
+        }
+        std::sort(strandCands.begin(), strandCands.end(),
+                  [](const StrandCand& a, const StrandCand& b) {
+                      if (a.overlap != b.overlap) {
+                          return a.overlap > b.overlap;
+                      }
+                      if (a.newStrand != b.newStrand) {
+                          return a.newStrand < b.newStrand;
+                      }
+                      return a.oldStrand < b.oldStrand;
+                  });
+        std::vector<int> newToOld(static_cast<size_t>(newLoop->numStrands), -1);
+        std::vector<bool> oldTaken(static_cast<size_t>(oldLoop.numStrands), false);
+        for (const StrandCand& c : strandCands) {
+            if (newToOld[static_cast<size_t>(c.newStrand)] >= 0 ||
+                oldTaken[static_cast<size_t>(c.oldStrand)]) {
+                continue;
+            }
+            newToOld[static_cast<size_t>(c.newStrand)] = c.oldStrand;
+            oldTaken[static_cast<size_t>(c.oldStrand)] = true;
+        }
+        // Any unmatched new strand (shouldn't happen when counts match) gets
+        // the first free old id.
+        for (int ns = 0; ns < newLoop->numStrands; ++ns) {
+            if (newToOld[static_cast<size_t>(ns)] >= 0) {
+                continue;
+            }
+            for (int os = 0; os < oldLoop.numStrands; ++os) {
+                if (!oldTaken[static_cast<size_t>(os)]) {
+                    newToOld[static_cast<size_t>(ns)] = os;
+                    oldTaken[static_cast<size_t>(os)] = true;
+                    break;
+                }
+            }
+        }
+        for (int k = 1; k <= newLoop->numEdges; ++k) {
+            const int ns = newLoop->strandOfEdge[static_cast<size_t>(k)];
+            if (ns >= 0 && ns < newLoop->numStrands &&
+                newToOld[static_cast<size_t>(ns)] >= 0) {
+                newLoop->strandOfEdge[static_cast<size_t>(k)] =
+                    newToOld[static_cast<size_t>(ns)];
+            }
+        }
+    }
+
     // Match old faces (face beads plus the exterior) to new faces by
     // half-edge overlap. Faces away from the triangle match exactly; the
     // affected ones keep enough labels for a best-overlap assignment.
