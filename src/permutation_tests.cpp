@@ -379,7 +379,8 @@ bool RunPermutationTests()
             if (triFace >= 0) {
                 Check(phys.StartR3Move(triFace), "R3 end-to-end: move starts");
                 int frames = 0;
-                while (phys.R3Active() && !phys.R3Complete() && frames < 2000) {
+                // Pre-honeycomb settle rounds + slide need a larger frame budget.
+                while (phys.R3Active() && !phys.R3Complete() && frames < 12000) {
                     phys.R3Step();
                     ++frames;
                 }
@@ -389,11 +390,19 @@ bool RunPermutationTests()
                 R3FaceInfo info;
                 int meeting[3] = {-1, -1, -1};
                 phys.GetR3Result(&info, meeting);
+                for (int i = 0; i < 3; ++i) {
+                    Check(meeting[i] >= 0 && meeting[i] < static_cast<int>(neck2.beads.size()),
+                          "R3 end-to-end: meeting bead is valid");
+                    Check(!neck2.beads[static_cast<size_t>(meeting[i])].isVertex &&
+                              !neck2.beads[static_cast<size_t>(meeting[i])].removed,
+                          "R3 end-to-end: meeting is the honeycomb side bead");
+                }
                 int newExterior = -1;
                 const std::unique_ptr<Multiloop> moved =
                     FinalizeR3(loop, neck2, info, meeting, exterior, &newExterior);
                 Check(moved != nullptr, "R3 end-to-end: finalize succeeds");
                 if (moved) {
+                    phys.EnsureR3ExteriorHoneycombMins(*moved);
                     Check(ValidateMultiloopSigma(moved->sigma).empty(),
                           "R3 end-to-end: rewritten sigma is valid");
                     Check(newExterior >= 0, "R3 end-to-end: exterior face remapped");

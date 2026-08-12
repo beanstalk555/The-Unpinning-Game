@@ -649,6 +649,7 @@ namespace
                 physics->CancelR3Move();
                 return;
             }
+            physics->EnsureR3ExteriorHoneycombMins(*newLoop);
             physics.reset();
             loop = std::move(newLoop);
             debugFaceBeadIndex = -1;

@@ -641,7 +641,7 @@ void Physics::Step()
         MaintainBeadSpacingDuringDrag();
     }
     if (structureDirty_) {
-        if (r3Active_) {
+        if (r3Active_ && r3Phase_ == R3Phase::Slide) {
             RebuildStructuresR3();
         }
         else {
@@ -878,7 +878,7 @@ void Physics::MaintainBeadSpacingDuringDrag()
     }
 
     if (structureDirty_) {
-        if (r3Active_) {
+        if (r3Active_ && r3Phase_ == R3Phase::Slide) {
             RebuildStructuresR3();
         }
         else {
@@ -1496,21 +1496,243 @@ void Physics::AutoStep()
 }
 
 // ---------------------------------------------------------------------------
-// Reidemeister 3
+// Reidemeister 3 (honeycomb-tighten, then slide)
 // ---------------------------------------------------------------------------
+
+void Physics::ClearR3State()
+{
+    for (R3Slider& s : r3Sliders_) {
+        s = R3Slider{};
+    }
+    r3CutEdges_.clear();
+    r3ExteriorEdges_.clear();
+    r3Meeting_[0] = r3Meeting_[1] = r3Meeting_[2] = -1;
+    r3StallFrames_ = 0;
+    r3SettleEdge_ = -1;
+    r3SettleLength_ = 0.0f;
+    r3SettleFrames_ = 0;
+    r3Phase_ = R3Phase::PreHoneycomb;
+    r3PreSub_ = R3PreSub::NeedRemove;
+}
+
+std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
+{
+    std::vector<int> chain;
+    chain.push_back(vertexBead);
+    int prev = vertexBead;
+    int cur = neck_->NeighborToward(vertexBead, halfEdge);
+    int guard = 0;
+    const int limit = BeadCount() + 8;
+    while (cur >= 0 && !neck_->beads[static_cast<size_t>(cur)].isVertex) {
+        if (neck_->beads[static_cast<size_t>(cur)].removed) {
+            break;
+        }
+        chain.push_back(cur);
+        const Bead& b = neck_->beads[static_cast<size_t>(cur)];
+        const int nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+        if (nxt == prev) {
+            break;
+        }
+        prev = cur;
+        cur = nxt;
+        if (++guard > limit) {
+            break;
+        }
+    }
+    if (cur >= 0 && neck_->beads[static_cast<size_t>(cur)].isVertex) {
+        chain.push_back(cur);
+    }
+    return chain;
+}
+
+int Physics::EdgeInteriorCount(int edge) const
+{
+    if (edge < 1 || edge >= static_cast<int>(chains_.size())) {
+        return 0;
+    }
+    const std::vector<int>& chain = chains_[edge];
+    if (chain.size() < 2) {
+        return 0;
+    }
+    return static_cast<int>(chain.size()) - 2;
+}
+
+float Physics::EdgeChainLength(int edge) const
+{
+    if (edge < 1 || edge >= static_cast<int>(chains_.size())) {
+        return 0.0f;
+    }
+    const std::vector<int>& chain = chains_[edge];
+    float length = 0.0f;
+    for (size_t i = 0; i + 1 < chain.size(); ++i) {
+        const Vector2 a = PosOf(chain[i]);
+        const Vector2 b = PosOf(chain[i + 1]);
+        length += std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+    }
+    return length;
+}
+
+int Physics::InsertBeadAtFarthestGap(int edge)
+{
+    if (structureDirty_) {
+        if (r3Phase_ == R3Phase::Slide) {
+            RebuildStructuresR3();
+        }
+        else {
+            RebuildStructures();
+        }
+    }
+    else {
+        RefreshEdgeChain(edge);
+    }
+    if (edge < 1 || edge >= static_cast<int>(chains_.size())) {
+        return -1;
+    }
+    const std::vector<int>& chain = chains_[edge];
+    if (chain.size() < 2) {
+        return -1;
+    }
+    size_t best = 0;
+    float bestDist = -1.0f;
+    for (size_t i = 0; i + 1 < chain.size(); ++i) {
+        const Vector2 a = PosOf(chain[i]);
+        const Vector2 b = PosOf(chain[i + 1]);
+        const float d = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+        if (d > bestDist) {
+            bestDist = d;
+            best = i;
+        }
+    }
+    const int beadsBefore = BeadCount();
+    const int inserted = InsertEdgeBeadBetween(chain[best], chain[best + 1], edge);
+    if (inserted >= 0) {
+        RefreshEdgeChain(edge);
+        RebuildSpringsFromChains();
+        if (r3Phase_ == R3Phase::Slide) {
+            // Collision groups stay frozen during the slide; only adjust face
+            // body ids if the necklace grew, then add the new bead locally.
+            if (BeadCount() > beadsBefore) {
+                const int delta = BeadCount() - beadsBefore;
+                for (std::vector<int>& group : faceBodies_) {
+                    for (int& body : group) {
+                        if (body >= beadsBefore) {
+                            body += delta;
+                        }
+                    }
+                }
+            }
+            AddBeadToFrozenGroups(inserted, chain[best]);
+        }
+        else {
+            // Phase A (and any non-slide use): refresh boundaries and rebuild
+            // faceBodies_ so face-bead ids stay BeadCount()+fi.
+            RefreshFaceBodiesForEdge(edge);
+            RebuildFaceBodiesFromCache();
+        }
+        structureDirty_ = false;
+    }
+    return inserted;
+}
+
+int Physics::RemoveFarthestFromFaceCenter(int edge, int face)
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    else {
+        RefreshEdgeChain(edge);
+    }
+    if (edge < 1 || edge >= static_cast<int>(chains_.size())) {
+        return -1;
+    }
+    const std::vector<int>& chain = chains_[edge];
+    if (static_cast<int>(chain.size()) - 2 < 2) {
+        return -1; // need more than one interior to remove
+    }
+    const Vector2 fc = FaceBeadPosition(face);
+    int best = -1;
+    float bestDist = -1.0f;
+    for (size_t i = 1; i + 1 < chain.size(); ++i) {
+        const int bead = chain[i];
+        if (neck_->beads[static_cast<size_t>(bead)].removed) {
+            continue;
+        }
+        const Vector2 p = PosOf(bead);
+        const float d = std::sqrt((p.x - fc.x) * (p.x - fc.x) + (p.y - fc.y) * (p.y - fc.y));
+        if (d > bestDist) {
+            bestDist = d;
+            best = bead;
+        }
+    }
+    if (best < 0) {
+        return -1;
+    }
+    RemoveEdgeBead(best);
+    if (!neck_->beads[static_cast<size_t>(best)].removed) {
+        return -1;
+    }
+    RefreshEdgeChain(edge);
+    RebuildSpringsFromChains();
+    RefreshFaceBodiesForEdge(edge);
+    RebuildFaceBodiesFromCache();
+    structureDirty_ = false;
+    return best;
+}
+
+bool Physics::R3SettleTick(int edge, float lengthAtStart)
+{
+    for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
+        Step();
+    }
+    r3SettleFrames_ += params_->autoStepsPerFrame;
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    else {
+        RefreshEdgeChain(edge);
+    }
+    const double threshold =
+        params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(lengthAtStart, 1.0f)));
+    if (EdgeTension(edge) < threshold) {
+        return true;
+    }
+    if (r3SettleFrames_ >= params_->relaxStepsMax) {
+        return true;
+    }
+    return false;
+}
+
+bool Physics::NeighborHoneycombBlocksRemoval(int edge)
+{
+    // Match StrikeHoneycombEdges: a face with <=6 boundary beads must not lose
+    // more edge beads. Protect neighbors of the clicked triangle only.
+    std::unordered_set<int> faces;
+    AppendIncidentFaces(edge, faces);
+    for (const int f : faces) {
+        if (f == r3Info_.face || f == exteriorFace_) {
+            continue;
+        }
+        WalkFaceBoundaryNoDots(f);
+        const FaceBead* fb = FaceBeadFor(f);
+        if (fb != nullptr && fb->boundaryBeads.size() <= 6) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool Physics::StartR3Move(int face)
 {
     if (r3Active_ || autoActive_) {
         return false;
     }
+    ClearR3State();
+
     R3FaceInfo info;
     if (!AnalyzeR3Face(*loop_, neck_, face, &info)) {
         return false;
     }
 
-    // Orientation of the face walk in grid coordinates decides between the
-    // two mirror-image sigma rewrites.
     {
         std::vector<int> boundary;
         std::vector<float> dots;
@@ -1528,7 +1750,6 @@ bool Physics::StartR3Move(int face)
         info.ccw = SignedShoelaceArea(poly) > 0.0;
     }
 
-    // The rewritten sigma must be valid before we cut anything.
     {
         Permutation newSigma;
         if (!ComputeR3Sigma(*loop_, info, &newSigma)) {
@@ -1536,72 +1757,215 @@ bool Physics::StartR3Move(int face)
         }
     }
 
-    // Ordered beads along one side, walked from a triangle vertex in the
-    // direction of the given half-edge.
-    const auto walkSide = [&](int vertexBead, int halfEdge) {
-        std::vector<int> chain;
-        chain.push_back(vertexBead);
-        int prev = vertexBead;
-        int cur = neck_->NeighborToward(vertexBead, halfEdge);
-        int guard = 0;
-        const int limit = BeadCount() + 8;
-        while (cur >= 0 && !neck_->beads[static_cast<size_t>(cur)].isVertex) {
-            chain.push_back(cur);
-            const Bead& b = neck_->beads[static_cast<size_t>(cur)];
-            const int nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
-            prev = cur;
-            cur = nxt;
-            if (++guard > limit) {
-                break;
-            }
-        }
-        if (cur >= 0) {
-            chain.push_back(cur);
-        }
-        return chain;
-    };
-
-    // Each side needs room for a meeting bead: at least three interior beads.
+    // Pad any empty face-cycle side up to one interior bead.
     for (int i = 0; i < 3; ++i) {
         for (int guard = 0; guard < 8; ++guard) {
-            const std::vector<int> chain = walkSide(info.vertexBead[i], info.h[i]);
+            const std::vector<int> chain = WalkSideChain(info.vertexBead[i], info.h[i]);
             if (chain.size() < 2) {
                 return false;
             }
-            if (static_cast<int>(chain.size()) - 2 >= 3) {
+            if (static_cast<int>(chain.size()) - 2 >= 1) {
                 break;
             }
-            InsertEdgeBeadBetween(chain[0], chain[1], std::abs(info.h[i]));
+            if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(info.h[i])) < 0) {
+                return false;
+            }
         }
     }
 
-    // Fresh structures pre-cut; the collision groups built here stay frozen
-    // for the whole slide (each side's outer face already contains both
-    // sliding branches and the side beads, so the groups cover the move).
     RebuildStructures();
+
+    r3ExteriorEdges_.clear();
+    for (int i = 0; i < 3; ++i) {
+        for (const int h : {info.a[i], info.b[i]}) {
+            const int k = std::abs(h);
+            bool have = false;
+            for (const int e : r3ExteriorEdges_) {
+                if (e == k) {
+                    have = true;
+                    break;
+                }
+            }
+            if (!have) {
+                r3ExteriorEdges_.push_back(k);
+            }
+        }
+    }
+
+    r3Info_ = info;
+    r3Active_ = true;
+    r3Complete_ = false;
+    r3Phase_ = R3Phase::PreHoneycomb;
+    r3PreSub_ = R3PreSub::NeedRemove;
+    structureDirty_ = true;
+    return true;
+}
+
+void Physics::R3PreHoneycombStep()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    if (r3PreSub_ == R3PreSub::NeedRemove) {
+        bool allOne = true;
+        std::vector<int> oversized;
+        for (int i = 0; i < 3; ++i) {
+            const int k = std::abs(r3Info_.h[i]);
+            RefreshEdgeChain(k);
+            const int n = EdgeInteriorCount(k);
+            if (n < 1) {
+                const std::vector<int>& chain = chains_[k];
+                if (chain.size() >= 2) {
+                    InsertEdgeBeadBetween(chain[0], chain[1], k);
+                    RefreshEdgeChain(k);
+                    RebuildSpringsFromChains();
+                    RefreshFaceBodiesForEdge(k);
+                    RebuildFaceBodiesFromCache();
+                }
+            }
+            else if (n > 1) {
+                allOne = false;
+                oversized.push_back(k);
+            }
+        }
+        if (allOne) {
+            if (!BeginR3Slide()) {
+                CancelR3Move();
+            }
+            return;
+        }
+        if (oversized.empty()) {
+            CancelR3Move();
+            return;
+        }
+
+        std::vector<int> candidates;
+        for (const int k : oversized) {
+            if (!NeighborHoneycombBlocksRemoval(k)) {
+                candidates.push_back(k);
+            }
+        }
+        if (candidates.empty()) {
+            // Cannot strip further without breaking neighbor honeycombs.
+            if (!BeginR3Slide()) {
+                CancelR3Move();
+            }
+            return;
+        }
+
+        const int pick =
+            candidates[static_cast<size_t>(std::rand() % static_cast<int>(candidates.size()))];
+        r3SettleLength_ = EdgeChainLength(pick);
+        if (RemoveFarthestFromFaceCenter(pick, r3Info_.face) < 0) {
+            CancelR3Move();
+            return;
+        }
+        r3SettleEdge_ = pick;
+        r3SettleFrames_ = 0;
+        r3PreSub_ = R3PreSub::SettlingRemove;
+        return;
+    }
+
+    if (r3PreSub_ == R3PreSub::SettlingRemove) {
+        if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
+            r3PreSub_ = R3PreSub::NeedInsert;
+        }
+        return;
+    }
+
+    if (r3PreSub_ == R3PreSub::NeedInsert) {
+        if (r3ExteriorEdges_.empty()) {
+            r3PreSub_ = R3PreSub::NeedRemove;
+            return;
+        }
+        for (const int k : r3ExteriorEdges_) {
+            RefreshEdgeChain(k);
+        }
+        int bestEdge = r3ExteriorEdges_[0];
+        double bestTension = -1.0;
+        for (const int k : r3ExteriorEdges_) {
+            const double t = EdgeTension(k);
+            if (t > bestTension) {
+                bestTension = t;
+                bestEdge = k;
+            }
+        }
+        const float length = EdgeChainLength(bestEdge);
+        const double threshold =
+            params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
+        if (bestTension < threshold) {
+            r3PreSub_ = R3PreSub::NeedRemove;
+            return;
+        }
+        r3SettleLength_ = length;
+        if (InsertBeadAtFarthestGap(bestEdge) < 0) {
+            r3PreSub_ = R3PreSub::NeedRemove;
+            return;
+        }
+        r3SettleEdge_ = bestEdge;
+        r3SettleFrames_ = 0;
+        r3PreSub_ = R3PreSub::SettlingInsert;
+        return;
+    }
+
+    if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
+        r3PreSub_ = R3PreSub::NeedRemove;
+    }
+}
+
+bool Physics::BeginR3Slide()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    for (int i = 0; i < 3; ++i) {
+        r3Info_.aTerminal[i] =
+            neck_->NeighborToward(r3Info_.vertexBead[i], r3Info_.a[i]);
+        r3Info_.bTerminal[i] =
+            neck_->NeighborToward(r3Info_.vertexBead[i], r3Info_.b[i]);
+        if (r3Info_.aTerminal[i] < 0 || r3Info_.bTerminal[i] < 0 ||
+            neck_->beads[static_cast<size_t>(r3Info_.aTerminal[i])].isVertex ||
+            neck_->beads[static_cast<size_t>(r3Info_.bTerminal[i])].isVertex) {
+            return false;
+        }
+    }
 
     for (int i = 0; i < 3; ++i) {
         const int j = (i + 1) % 3;
-        const std::vector<int> chain = walkSide(info.vertexBead[i], info.h[i]);
-        if (static_cast<int>(chain.size()) < 5 || chain.back() != info.vertexBead[j]) {
+        const std::vector<int> chain =
+            WalkSideChain(r3Info_.vertexBead[i], r3Info_.h[i]);
+        if (static_cast<int>(chain.size()) < 3 ||
+            chain.back() != r3Info_.vertexBead[j]) {
             return false;
         }
-        // bTerminal[i] slides forward along side i, from X_i toward X_{i+1}.
+        const int interiors = static_cast<int>(chain.size()) - 2;
+        const int mid = (interiors - 1) / 2;
+        const int meetIdx = 1 + mid;
+        if (neck_->beads[static_cast<size_t>(chain[static_cast<size_t>(meetIdx)])].isVertex) {
+            return false;
+        }
+        r3Meeting_[i] = chain[static_cast<size_t>(meetIdx)];
+
         R3Slider& f = r3Sliders_[2 * i];
         f = R3Slider{};
-        f.terminal = info.bTerminal[i];
-        f.cutVertex = info.vertexBead[i];
-        f.path.assign(chain.begin(), chain.end() - 1);
-        // aTerminal[i+1] slides backward along side i, from X_{i+1} toward X_i.
+        f.terminal = r3Info_.bTerminal[i];
+        f.cutVertex = r3Info_.vertexBead[i];
+        f.path.assign(chain.begin(), chain.begin() + meetIdx + 1);
+        f.targetIdx = 0;
+
         R3Slider& g = r3Sliders_[2 * i + 1];
         g = R3Slider{};
-        g.terminal = info.aTerminal[j];
-        g.cutVertex = info.vertexBead[j];
-        g.path.assign(chain.rbegin(), chain.rend() - 1);
+        g.terminal = r3Info_.aTerminal[j];
+        g.cutVertex = r3Info_.vertexBead[j];
+        g.path.clear();
+        for (int idx = static_cast<int>(chain.size()) - 1; idx >= meetIdx; --idx) {
+            g.path.push_back(chain[static_cast<size_t>(idx)]);
+        }
+        g.targetIdx = 0;
     }
 
-    // Cut the six terminal links (identified by half-edge, so kink loops at a
-    // corner are cut on the correct slot).
     const auto cutLink = [&](R3Slider& s, int halfEdge) {
         Bead& v = neck_->beads[static_cast<size_t>(s.cutVertex)];
         s.cutVertexSlot = -1;
@@ -1629,13 +1993,13 @@ bool Physics::StartR3Move(int face)
     bool cutsOk = true;
     for (int i = 0; i < 3 && cutsOk; ++i) {
         const int j = (i + 1) % 3;
-        cutsOk = cutLink(r3Sliders_[2 * i], info.b[i]) &&
-                 cutLink(r3Sliders_[2 * i + 1], info.a[j]);
+        cutsOk = cutLink(r3Sliders_[2 * i], r3Info_.b[i]) &&
+                 cutLink(r3Sliders_[2 * i + 1], r3Info_.a[j]);
     }
     for (int i = 0; i < 3; ++i) {
         const int j = (i + 1) % 3;
-        const int bEdge = std::abs(info.b[i]);
-        const int aEdge = std::abs(info.a[j]);
+        const int bEdge = std::abs(r3Info_.b[i]);
+        const int aEdge = std::abs(r3Info_.a[j]);
         bool haveB = false;
         bool haveA = false;
         for (const auto& entry : r3CutEdges_) {
@@ -1643,24 +2007,38 @@ bool Physics::StartR3Move(int face)
             haveA = haveA || entry.first == aEdge;
         }
         if (!haveB) {
-            r3CutEdges_.push_back({bEdge, info.bTerminal[i]});
+            r3CutEdges_.push_back({bEdge, r3Info_.bTerminal[i]});
         }
         if (!haveA) {
-            r3CutEdges_.push_back({aEdge, info.aTerminal[j]});
+            r3CutEdges_.push_back({aEdge, r3Info_.aTerminal[j]});
         }
     }
 
-    r3Info_ = info;
-    r3Active_ = true;
-    r3Complete_ = false;
-    r3StallFrames_ = 0;
-    r3Meeting_[0] = r3Meeting_[1] = r3Meeting_[2] = -1;
-    structureDirty_ = true;
-
     if (!cutsOk) {
-        CancelR3Move();
+        // Restore any partial cuts.
+        for (R3Slider& s : r3Sliders_) {
+            if (s.terminal < 0) {
+                continue;
+            }
+            if (s.cutNeighborSlot >= 0) {
+                neck_->beads[static_cast<size_t>(s.terminal)].neighbors[s.cutNeighborSlot] =
+                    s.cutVertex;
+            }
+            if (s.cutVertexSlot >= 0) {
+                neck_->beads[static_cast<size_t>(s.cutVertex)]
+                    .neighborOfHalfEdge[s.cutVertexSlot] = s.terminal;
+            }
+            s = R3Slider{};
+        }
+        r3CutEdges_.clear();
         return false;
     }
+
+    // Frozen collision groups for the slide.
+    RebuildStructures();
+    r3Phase_ = R3Phase::Slide;
+    r3StallFrames_ = 0;
+    structureDirty_ = true;
     return true;
 }
 
@@ -1669,23 +2047,25 @@ void Physics::CancelR3Move()
     if (!r3Active_) {
         return;
     }
-    for (R3Slider& s : r3Sliders_) {
-        if (s.terminal < 0) {
-            continue;
+    if (r3Phase_ == R3Phase::Slide) {
+        for (R3Slider& s : r3Sliders_) {
+            if (s.terminal < 0) {
+                continue;
+            }
+            if (s.cutNeighborSlot >= 0 && s.terminal < BeadCount() &&
+                !neck_->beads[static_cast<size_t>(s.terminal)].removed) {
+                neck_->beads[static_cast<size_t>(s.terminal)].neighbors[s.cutNeighborSlot] =
+                    s.cutVertex;
+            }
+            if (s.cutVertexSlot >= 0 && s.cutVertex < BeadCount()) {
+                neck_->beads[static_cast<size_t>(s.cutVertex)]
+                    .neighborOfHalfEdge[s.cutVertexSlot] = s.terminal;
+            }
         }
-        if (s.cutNeighborSlot >= 0) {
-            neck_->beads[static_cast<size_t>(s.terminal)].neighbors[s.cutNeighborSlot] =
-                s.cutVertex;
-        }
-        if (s.cutVertexSlot >= 0) {
-            neck_->beads[static_cast<size_t>(s.cutVertex)]
-                .neighborOfHalfEdge[s.cutVertexSlot] = s.terminal;
-        }
-        s = R3Slider{};
     }
     r3Active_ = false;
     r3Complete_ = false;
-    r3CutEdges_.clear();
+    ClearR3State();
     structureDirty_ = true;
 }
 
@@ -1733,13 +2113,10 @@ void Physics::RebuildStructuresR3()
     for (int k = 1; k <= n; ++k) {
         chains_[k] = WalkEdge(k);
     }
-    // Cut edges no longer reach both vertices; walk them from a terminal so
-    // their whole bead chain keeps its springs.
     for (const auto& entry : r3CutEdges_) {
         chains_[entry.first] = WalkFromTerminal(entry.second);
     }
     RebuildSpringsFromChains();
-    // faceBodies_ intentionally left frozen from the pre-cut rebuild.
     structureDirty_ = false;
 }
 
@@ -1768,17 +2145,32 @@ void Physics::MaintainR3BranchSpacing()
             if (std::sqrt(dx * dx + dy * dy) <= gapThreshold) {
                 continue;
             }
+            const int beadsBefore = BeadCount();
             const int inserted = InsertEdgeBeadBetween(chain[i], chain[i + 1], entry.first);
             if (inserted >= 0) {
+                if (BeadCount() > beadsBefore) {
+                    const int delta = BeadCount() - beadsBefore;
+                    for (std::vector<int>& group : faceBodies_) {
+                        for (int& body : group) {
+                            if (body >= beadsBefore) {
+                                body += delta;
+                            }
+                        }
+                    }
+                }
                 AddBeadToFrozenGroups(inserted, chain[i]);
             }
-            break; // one insert per branch per frame
+            break;
         }
     }
 }
 
 bool Physics::R3SliderSettled(const R3Slider& s) const
 {
+    if (s.path.empty() || s.targetIdx < 0 ||
+        s.targetIdx >= static_cast<int>(s.path.size())) {
+        return false;
+    }
     const Vector2 pa = PosOf(s.terminal);
     const Vector2 pb = PosOf(s.path[static_cast<size_t>(s.targetIdx)]);
     const float dx = pb.x - pa.x;
@@ -1788,6 +2180,9 @@ bool Physics::R3SliderSettled(const R3Slider& s) const
 
 void Physics::AdvanceR3Slider(R3Slider& s)
 {
+    if (s.targetIdx + 1 >= static_cast<int>(s.path.size())) {
+        return;
+    }
     ++s.targetIdx;
     const Vector2 from = PosOf(s.path[static_cast<size_t>(s.targetIdx) - 1]);
     const Vector2 to = PosOf(s.path[static_cast<size_t>(s.targetIdx)]);
@@ -1797,7 +2192,6 @@ void Physics::AdvanceR3Slider(R3Slider& s)
     if (len < 1e-6f) {
         return;
     }
-    // A boost tangent to the boundary helps the terminal hop past collisions.
     const float boost = 0.5f * params_->maxSpeed;
     vel_[s.terminal].x += boost * dx / len;
     vel_[s.terminal].y += boost * dy / len;
@@ -1808,6 +2202,11 @@ void Physics::R3Step()
     if (!r3Active_ || r3Complete_) {
         return;
     }
+    if (r3Phase_ == R3Phase::PreHoneycomb) {
+        R3PreHoneycombStep();
+        return;
+    }
+
     for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
         Step();
     }
@@ -1819,8 +2218,9 @@ void Physics::R3Step()
         R3Slider& f = r3Sliders_[2 * i];
         R3Slider& g = r3Sliders_[2 * i + 1];
         const int m = static_cast<int>(f.path.size()) - 1;
+        // Precomputed meeting: both paths end at the same honeycomb bead.
         if (f.targetIdx + g.targetIdx >= m + 1) {
-            continue; // this pair already pulls toward a shared bead
+            continue;
         }
         allConverged = false;
         if (!R3SliderSettled(f) || !R3SliderSettled(g)) {
@@ -1846,9 +2246,12 @@ void Physics::R3Step()
             }
         }
         if (settled) {
+            // Prefer the precomputed meetings from the honeycomb phase.
             for (int i = 0; i < 3; ++i) {
-                const R3Slider& f = r3Sliders_[2 * i];
-                r3Meeting_[i] = f.path[static_cast<size_t>(f.targetIdx)];
+                if (r3Meeting_[i] < 0) {
+                    const R3Slider& f = r3Sliders_[2 * i];
+                    r3Meeting_[i] = f.path[static_cast<size_t>(f.targetIdx)];
+                }
             }
             r3Complete_ = true;
             return;
@@ -1860,5 +2263,141 @@ void Physics::R3Step()
     }
     else if (++r3StallFrames_ > 240) {
         CancelR3Move();
+    }
+}
+
+void Physics::EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop)
+{
+    // Build half-edge → crossing and half-edge → face maps for the rewritten loop.
+    std::unordered_map<int, int> crossingOf;
+    const std::vector<std::vector<int>> cycles = newLoop.sigma.Cycles();
+    for (int c = 0; c < static_cast<int>(cycles.size()); ++c) {
+        for (const int h : cycles[static_cast<size_t>(c)]) {
+            crossingOf[h] = c;
+        }
+    }
+    std::unordered_map<int, int> faceOf;
+    for (int f = 0; f < static_cast<int>(newLoop.faces.size()); ++f) {
+        for (const int h : newLoop.faces[static_cast<size_t>(f)]) {
+            faceOf[h] = f;
+        }
+    }
+
+    const auto walkEdgeNew = [&](int edge) {
+        std::vector<int> chain;
+        const auto itStart = crossingOf.find(edge);
+        if (itStart == crossingOf.end()) {
+            return chain;
+        }
+        if (itStart->second < 0 ||
+            itStart->second >= static_cast<int>(neck_->crossingBead.size())) {
+            return chain;
+        }
+        const int vStart = neck_->crossingBead[static_cast<size_t>(itStart->second)];
+        if (vStart < 0 || vStart >= BeadCount()) {
+            return chain;
+        }
+        chain.push_back(vStart);
+        int prev = vStart;
+        int cur = neck_->NeighborToward(vStart, edge);
+        int guard = 0;
+        const int limit = BeadCount() + 8;
+        while (cur >= 0 && !neck_->beads[static_cast<size_t>(cur)].isVertex) {
+            if (neck_->beads[static_cast<size_t>(cur)].removed) {
+                break;
+            }
+            chain.push_back(cur);
+            const Bead& b = neck_->beads[static_cast<size_t>(cur)];
+            const int nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+            if (nxt == prev) {
+                break;
+            }
+            prev = cur;
+            cur = nxt;
+            if (++guard > limit) {
+                break;
+            }
+        }
+        if (cur >= 0 && neck_->beads[static_cast<size_t>(cur)].isVertex) {
+            chain.push_back(cur);
+        }
+        return chain;
+    };
+
+    const auto isLoop = [&](int edge) {
+        const auto itPos = crossingOf.find(edge);
+        const auto itNeg = crossingOf.find(-edge);
+        return itPos != crossingOf.end() && itNeg != crossingOf.end() &&
+               itPos->second == itNeg->second;
+    };
+
+    const auto faceSize = [&](int halfEdge) {
+        const auto it = faceOf.find(halfEdge);
+        if (it == faceOf.end()) {
+            return 0;
+        }
+        return static_cast<int>(newLoop.faces[static_cast<size_t>(it->second)].size());
+    };
+
+    const auto insertFarthest = [&](int edge) {
+        const std::vector<int> chain = walkEdgeNew(edge);
+        if (chain.size() < 2) {
+            return -1;
+        }
+        size_t best = 0;
+        float bestDist = -1.0f;
+        for (size_t i = 0; i + 1 < chain.size(); ++i) {
+            const Vector2 a = PosOf(chain[i]);
+            const Vector2 b = PosOf(chain[i + 1]);
+            const float d =
+                std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+            if (d > bestDist) {
+                bestDist = d;
+                best = i;
+            }
+        }
+        return InsertEdgeBeadBetween(chain[best], chain[best + 1], edge);
+    };
+
+    // Unique exterior labels from the pre-move analysis (half-edge labels unchanged).
+    std::vector<int> exteriors;
+    for (int i = 0; i < 3; ++i) {
+        for (const int h : {r3Info_.a[i], r3Info_.b[i]}) {
+            const int k = std::abs(h);
+            bool have = false;
+            for (const int e : exteriors) {
+                if (e == k) {
+                    have = true;
+                    break;
+                }
+            }
+            if (!have) {
+                exteriors.push_back(k);
+            }
+        }
+    }
+
+    for (const int k : exteriors) {
+        int minBeads = 0;
+        if (isLoop(k)) {
+            minBeads = 5; // monogon
+        }
+        else if (faceSize(k) == 2 || faceSize(-k) == 2) {
+            minBeads = 2; // bigon
+        }
+        if (minBeads <= 0) {
+            continue;
+        }
+        for (int guard = 0; guard < 16; ++guard) {
+            const std::vector<int> chain = walkEdgeNew(k);
+            const int interiors =
+                (chain.size() >= 2) ? static_cast<int>(chain.size()) - 2 : 0;
+            if (interiors >= minBeads) {
+                break;
+            }
+            if (insertFarthest(k) < 0) {
+                break;
+            }
+        }
     }
 }

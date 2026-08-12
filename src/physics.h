@@ -80,15 +80,18 @@ public:
     // Starts the animated move on a triangular face. Returns false when the
     // face does not qualify or another mode is running.
     bool StartR3Move(int face);
-    // Reverts the cuts and abandons the move.
+    // Reverts the cuts (if any) and abandons the move.
     void CancelR3Move();
     bool R3Active() const { return r3Active_; }
     bool R3Complete() const { return r3Complete_; }
-    // Advance the sliding animation by one displayed frame.
+    // Advance the pre-honeycomb / sliding animation by one displayed frame.
     void R3Step();
     // Valid once R3Complete(): the analyzed face and the meeting bead on each
     // side (the new crossing between X_i and X_{i+1} sits at meeting[i]).
     void GetR3Result(R3FaceInfo* info, int meeting[3]) const;
+    // After FinalizeR3: top up exterior arcs sa–sf so monogons have ≥5 edge
+    // beads and bigons have ≥2. Uses newLoop for topology; edits neck_.
+    void EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop);
 
     // Excess area (polyArea minus boundary pie slices) for a face bead.
     double FaceExcessArea(const FaceBead& fb) const;
@@ -213,6 +216,21 @@ private:
     std::unordered_set<int> removedEdgesLastRound_;
 
     // ---- Reidemeister 3 state machine ----
+    // Phase A: tighten the triangle to a honeycomb (one edge bead per side).
+    // Phase B: cut-and-slide terminals toward those three beads (meetings).
+    enum class R3Phase
+    {
+        PreHoneycomb,
+        Slide
+    };
+    enum class R3PreSub
+    {
+        NeedRemove,
+        SettlingRemove,
+        NeedInsert,
+        SettlingInsert
+    };
+
     // One sliding terminal: an edge bead cut from its old triangle vertex,
     // spring-tied to successive boundary beads along its slide path.
     struct R3Slider
@@ -225,17 +243,29 @@ private:
         int targetIdx = 0;        // current spring target = path[targetIdx]
     };
 
-    // Rebuild chains/springs during the slide: cut edges are walked from
-    // their terminal beads; collision groups stay frozen from the pre-cut state.
     void RebuildStructuresR3();
     std::vector<int> WalkFromTerminal(int terminal) const;
+    std::vector<int> WalkSideChain(int vertexBead, int halfEdge) const;
     void AddBeadToFrozenGroups(int bead, int adjacent);
     void MaintainR3BranchSpacing();
     bool R3SliderSettled(const R3Slider& s) const;
     void AdvanceR3Slider(R3Slider& s);
+    void R3PreHoneycombStep();
+    bool BeginR3Slide();
+    int EdgeInteriorCount(int edge) const;
+    float EdgeChainLength(int edge) const;
+    int InsertBeadAtFarthestGap(int edge);
+    int RemoveFarthestFromFaceCenter(int edge, int face);
+    bool R3SettleTick(int edge, float lengthAtStart);
+    // True when removing from edge would strip a neighbor face that is already
+    // at the honeycomb floor (≤6 boundary beads). The clicked R3 face is ignored.
+    bool NeighborHoneycombBlocksRemoval(int edge);
+    void ClearR3State();
 
     bool r3Active_ = false;
     bool r3Complete_ = false;
+    R3Phase r3Phase_ = R3Phase::PreHoneycomb;
+    R3PreSub r3PreSub_ = R3PreSub::NeedRemove;
     R3FaceInfo r3Info_;
     // Sliders 2i / 2i+1 slide along side i: bTerminal[i] forward from X_i and
     // aTerminal[i+1] backward from X_{i+1}; they meet at the new crossing.
@@ -243,6 +273,11 @@ private:
     int r3Meeting_[3] = {-1, -1, -1};
     int r3StallFrames_ = 0;
     std::vector<std::pair<int, int>> r3CutEdges_; // (edge label, terminal bead)
+    // Unique exterior edge labels |a[i]|, |b[i]| (sa–sf, possibly fewer than 6).
+    std::vector<int> r3ExteriorEdges_;
+    int r3SettleEdge_ = -1;
+    float r3SettleLength_ = 0.0f;
+    int r3SettleFrames_ = 0;
 
     bool debugTiming_ = false;
     PhysicsDebugTimings debugTimings_;
