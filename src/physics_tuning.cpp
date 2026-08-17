@@ -20,7 +20,7 @@ namespace
     constexpr float kPad = 14.0f;
     constexpr float kResetH = 30.0f;
     constexpr float kExtraRowH = 34.0f;
-    constexpr int kSliderCount = 14;
+    constexpr int kSliderCount = 15;
 
     float Clampf(float v, float lo, float hi)
     {
@@ -50,7 +50,7 @@ namespace
         {"Spring stiffness", 1.0f, 2000.0f, false, false},
         {"Collision stiffness", 1.0f, 500.0f, false, false},
         {"Drag stiffness", 1.0f, 500.0f, false, false},
-        {"Damping", 0.0f, 80.0f, false, false},
+        {"Damping", 0.0f, 8000.0f, false, false},
         {"Timestep (1/dt)", 10.0f, 480.0f, false, false},
         {"Substeps", 1.0f, 100.0f, true, false},
         {"Max speed", 0.5f, 50.0f, false, false},
@@ -61,6 +61,7 @@ namespace
         {"Min excess area", 0.0f, 5.0f, false, true},
         {"Collision bounds (x bead)", 1.0f, 8.0f, false, false},
         {"Gap size (x bead)", 1.0f, 1.5f, false, false},
+        {"R3 face bead mass", 1.0f, 1000.0f, false, false},
     };
 
     const char* kRatioModeLabels[] = {"minimum", "maximum", "average"};
@@ -82,6 +83,7 @@ namespace
         case 11: return static_cast<float>(params.minExcessArea);
         case 12: return params.collisionBoundsScale;
         case 13: return params.gapSize;
+        case 14: return params.r3FaceBeadMass;
         default: return 0.0f;
         }
     }
@@ -103,6 +105,7 @@ namespace
         case 11: params.minExcessArea = value; break;
         case 12: params.collisionBoundsScale = value; break;
         case 13: params.gapSize = value; break;
+        case 14: params.r3FaceBeadMass = value; break;
         default: break;
         }
     }

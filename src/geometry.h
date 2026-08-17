@@ -15,3 +15,7 @@ double SignedShoelaceArea(const std::vector<Vec2d>& vertices);
 
 // Absolute area enclosed by a simple (non-self-intersecting) polygon.
 double ShoelaceArea(const std::vector<Vec2d>& vertices);
+
+// Even-odd raycast: true when `point` lies inside the polygon. Vertices on
+// the boundary may go either way; fewer than three vertices is outside.
+bool PointInPolygon(const Vec2d& point, const std::vector<Vec2d>& vertices);

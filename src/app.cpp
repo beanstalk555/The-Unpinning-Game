@@ -1127,13 +1127,17 @@ namespace
             }
         }
         // Face beads are always shown.
+        const Color kOutsideFill = {210, 55, 50, 255};
+        const Color kOutsideEdge = {140, 25, 22, 255};
         const Color kExcessHighlight = {255, 120, 0, 255};
         for (const FaceBead& faceBead : necklace.faceBeads) {
             const Vector2 c = toScreen(faceBead.pos);
-            DrawCircleV(c, beadRadius, kFaceBeadFill);
-            Color ringColor = kFaceBeadEdge;
+            const bool outside = app.debug && app.physics &&
+                                 !app.physics->FaceBeadInsideFace(faceBead);
+            DrawCircleV(c, beadRadius, outside ? kOutsideFill : kFaceBeadFill);
+            Color ringColor = outside ? kOutsideEdge : kFaceBeadEdge;
             float ringThickness = outline;
-            if (app.debug && app.physics &&
+            if (!outside && app.debug && app.physics &&
                 app.physics->FaceExcessArea(faceBead) > app.physicsParams.minExcessArea) {
                 ringColor = kExcessHighlight;
                 ringThickness = Clampf(outline * 2.5f, 2.5f, 6.0f);
@@ -1146,7 +1150,8 @@ namespace
                 fontSize *= beadRadius * 1.5f / textWidth;
                 textWidth = TextWidth(text, fontSize);
             }
-            DrawTextS(text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f, fontSize, Color{15, 35, 12, 255});
+            DrawTextS(text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f, fontSize,
+                      outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
         }
 
         // The multiloop itself: orthogonal circle arcs within each bead,

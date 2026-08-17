@@ -521,17 +521,22 @@ void Physics::Integrate(float dt)
         force[dragBody_].y += params_->dragStiffness * (dragTarget_.y - p.y);
     }
 
-    // Damping + semi-implicit Euler integration (mass = 1, removed beads frozen).
+    // Damping + semi-implicit Euler. Edge beads have mass 1; during R3, face
+    // beads use r3FaceBeadMass so they stay put while the necklace slides.
     for (int body = 0; body < total; ++body) {
         if (body < beads && neck_->beads[body].removed) {
             continue;
+        }
+        float mass = 1.0f;
+        if (r3Active_ && body >= beads) {
+            mass = std::max(params_->r3FaceBeadMass, 1e-3f);
         }
         Vector2& v = VelOf(body);
         Vector2 f = force[body];
         f.x -= params_->damping * v.x;
         f.y -= params_->damping * v.y;
-        v.x += f.x * dt;
-        v.y += f.y * dt;
+        v.x += (f.x / mass) * dt;
+        v.y += (f.y / mass) * dt;
         const float speed = std::sqrt(v.x * v.x + v.y * v.y);
         if (speed > params_->maxSpeed) {
             v.x *= params_->maxSpeed / speed;
@@ -960,6 +965,36 @@ const FaceBead* Physics::FaceBeadFor(int face) const
         }
     }
     return nullptr;
+}
+
+bool Physics::FaceBeadInsideFace(const FaceBead& fb) const
+{
+    std::vector<int> boundary;
+    std::vector<float> unusedDots;
+    if (fb.face >= 0 && fb.face < static_cast<int>(loop_->faces.size())) {
+        WalkFaceBoundaryFromPhiCycle(loop_->faces[static_cast<size_t>(fb.face)], *neck_,
+                                     crossingOf_, boundary, unusedDots, nullptr, 0.0f, false);
+    }
+    if (boundary.size() < 3) {
+        boundary = fb.boundaryBeads;
+    }
+    if (boundary.size() < 3) {
+        return true;
+    }
+    std::vector<Vec2d> poly;
+    poly.reserve(boundary.size());
+    for (const int bead : boundary) {
+        if (bead < 0 || bead >= BeadCount() || neck_->beads[static_cast<size_t>(bead)].removed) {
+            continue;
+        }
+        const Vector2 p = PosOf(bead);
+        poly.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+    }
+    if (poly.size() < 3) {
+        return true;
+    }
+    const Vec2d center{static_cast<double>(fb.pos.x), static_cast<double>(fb.pos.y)};
+    return PointInPolygon(center, poly);
 }
 
 double Physics::FaceExcessArea(const FaceBead& fb) const

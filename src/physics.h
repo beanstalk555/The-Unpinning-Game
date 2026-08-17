@@ -96,6 +96,9 @@ public:
     // Excess area (polyArea minus boundary pie slices) for a face bead.
     double FaceExcessArea(const FaceBead& fb) const;
 
+    // True when the face bead's center is inside its face polygon (even-odd raycast).
+    bool FaceBeadInsideFace(const FaceBead& fb) const;
+
     // Same, looked up by combinatorial face index. Exterior face is infinite.
     double ExcessArea(int face) const;
 

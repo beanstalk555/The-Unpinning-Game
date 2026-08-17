@@ -92,6 +92,15 @@ bool RunPermutationTests()
 
         Check(near(ShoelaceArea({}), 0.0), "shoelace: empty polygon has area 0");
         Check(near(ShoelaceArea({{0.0, 0.0}, {1.0, 0.0}}), 0.0), "shoelace: segment has area 0");
+
+        Check(PointInPolygon({0.5, 0.5}, unitSquare), "point-in-poly: square center is inside");
+        Check(!PointInPolygon({1.5, 0.5}, unitSquare), "point-in-poly: point right of square is outside");
+        Check(!PointInPolygon({-0.1, 0.5}, unitSquare), "point-in-poly: point left of square is outside");
+        Check(PointInPolygon({0.5, 0.5}, lShape), "point-in-poly: L-shape stem is inside");
+        Check(PointInPolygon({1.5, 0.5}, lShape), "point-in-poly: L-shape foot is inside");
+        Check(PointInPolygon({0.5, 1.5}, lShape), "point-in-poly: L-shape upright is inside");
+        Check(!PointInPolygon({1.5, 1.5}, lShape), "point-in-poly: L-shape notch is outside");
+        Check(!PointInPolygon({0.5, 0.5}, {}), "point-in-poly: empty polygon is outside");
     }
 
     // Example multiloop from the first reference figure: 9 crossings, 18 edges.

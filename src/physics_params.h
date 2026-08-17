@@ -36,5 +36,8 @@ struct PhysicsParams
     // Center-to-center distance (in bead diameters) before inserting a bead while dragging.
     float gapSize = 1.2f;
 
+    // Face-bead mass during Reidemeister 3 (edge beads stay mass 1).
+    float r3FaceBeadMass = 10.0f;
+
     void ResetDefaults();
 };
