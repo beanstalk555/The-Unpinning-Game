@@ -112,6 +112,11 @@ public:
     void SetDebugFrameTotalMs(double ms);
     const PhysicsDebugTimings& DebugTimings() const { return debugTimings_; }
 
+    // Debug: collide every necklace bead with every other necklace bead
+    // (all-pairs), ignoring face groups. Face beads still use per-face groups.
+    void SetGlobalCollisions(bool enabled) { globalCollisions_ = enabled; }
+    bool GlobalCollisions() const { return globalCollisions_; }
+
 private:
     int BeadCount() const { return static_cast<int>(neck_->beads.size()); }
     Vector2 PosOf(int body) const;
@@ -133,7 +138,8 @@ private:
     void Integrate(float dt);
     void ComputeTension();
     int SubstepsForStep() const;
-    void ApplyFaceCollisions(std::vector<Vector2>& force, int total);
+    void ApplyFaceCollisions(std::vector<Vector2>& force, int total,
+                             const std::vector<char>& skipFaceBody);
     // Average spring tension along one edge's bead chain (stretch + compression).
     double EdgeTension(int edge) const;
 
@@ -264,6 +270,8 @@ private:
     // at the honeycomb floor (≤6 boundary beads). The clicked R3 face is ignored.
     bool NeighborHoneycombBlocksRemoval(int edge);
     void ClearR3State();
+    bool FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const;
+    void CollectR3InvolvedFaces(std::unordered_set<int>* out) const;
 
     bool r3Active_ = false;
     bool r3Complete_ = false;
@@ -284,4 +292,5 @@ private:
 
     bool debugTiming_ = false;
     PhysicsDebugTimings debugTimings_;
+    bool globalCollisions_ = false;
 };

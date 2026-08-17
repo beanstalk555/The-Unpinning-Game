@@ -101,6 +101,35 @@ bool RunPermutationTests()
         Check(PointInPolygon({0.5, 1.5}, lShape), "point-in-poly: L-shape upright is inside");
         Check(!PointInPolygon({1.5, 1.5}, lShape), "point-in-poly: L-shape notch is outside");
         Check(!PointInPolygon({0.5, 0.5}, {}), "point-in-poly: empty polygon is outside");
+
+        {
+            const InscribedCircle sq = LargestInscribedCircle(unitSquare, 0.01);
+            Check(sq.found, "inscribed: unit square finds a circle");
+            Check(PointInPolygon(sq.center, unitSquare), "inscribed: square center is inside");
+            Check(std::fabs(sq.center.x - 0.5) < 0.05 && std::fabs(sq.center.y - 0.5) < 0.05,
+                  "inscribed: square center is near (0.5, 0.5)");
+            Check(sq.radius > 0.45 && sq.radius < 0.55, "inscribed: square radius is near 0.5");
+
+            const std::vector<Vec2d> rightTri = {{0.0, 0.0}, {1.0, 0.0}, {0.0, 1.0}};
+            const InscribedCircle tri = LargestInscribedCircle(rightTri, 0.005);
+            Check(tri.found, "inscribed: right triangle finds a circle");
+            Check(PointInPolygon(tri.center, rightTri), "inscribed: triangle center is inside");
+            const double rExpect = (2.0 - std::sqrt(2.0)) * 0.5;
+            Check(std::fabs(tri.radius - rExpect) < 0.05, "inscribed: triangle radius is the inradius");
+            Check(std::fabs(tri.center.x - tri.radius) < 0.05 &&
+                      std::fabs(tri.center.y - tri.radius) < 0.05,
+                  "inscribed: triangle center is the incenter");
+
+            // Largest circle sits in the inner corner against the two outer
+            // walls and the reflex vertex: r = sqrt(2)/(1+sqrt(2)) = 2-sqrt(2).
+            const double rL = 2.0 - std::sqrt(2.0);
+            const InscribedCircle ell = LargestInscribedCircle(lShape, 0.01);
+            Check(ell.found, "inscribed: L-shape finds a circle");
+            Check(PointInPolygon(ell.center, lShape), "inscribed: L-shape center is inside");
+            Check(std::fabs(ell.radius - rL) < 0.04, "inscribed: L-shape radius is 2-sqrt(2)");
+            Check(std::fabs(ell.center.x - rL) < 0.05 && std::fabs(ell.center.y - rL) < 0.05,
+                  "inscribed: L-shape center is near the inner-corner incenter");
+        }
     }
 
     // Example multiloop from the first reference figure: 9 crossings, 18 edges.

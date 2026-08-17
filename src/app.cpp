@@ -535,6 +535,7 @@ namespace
         bool showBeads = false;
         bool showDebugTiming = true;
         bool showDebugExcessAreas = false;
+        bool showGlobalCollisions = false;
         int debugFaceBeadIndex = -1;
         int pickClickBody = -1;
         Vector2 pickClickPos = {0.0f, 0.0f};
@@ -1550,6 +1551,8 @@ namespace
         if (app.debug) {
             rx += checkbox(rx, row2, "timers", &app.showDebugTiming, !drawing) + 16.0f;
             rx += checkbox(rx, row2, "excess areas", &app.showDebugExcessAreas, !drawing) + 16.0f;
+            rx += checkbox(rx, row2, "global collisions", &app.showGlobalCollisions, !drawing) +
+                  16.0f;
         }
         if (!app.error.empty()) {
             DrawTextS(app.error, rx, row2 + 6.0f, 18.0f, kErrorRed);
@@ -1705,6 +1708,7 @@ namespace
                         }
                     }
                 }
+                app.physics->SetGlobalCollisions(app.debug && app.showGlobalCollisions);
                 const bool debugTiming = app.debug && app.showDebugTiming && app.physics;
                 if (debugTiming) {
                     app.physics->ResetDebugTimings();

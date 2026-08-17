@@ -423,39 +423,66 @@ void Physics::RebuildStructures()
     structureDirty_ = false;
 }
 
-void Physics::ApplyFaceCollisions(std::vector<Vector2>& force, int total)
+void Physics::ApplyFaceCollisions(std::vector<Vector2>& force, int total,
+                                 const std::vector<char>& skipFaceBody)
 {
     const ScopedTimer timer(debugTiming_ ? &debugTimings_.collisionMs : nullptr);
     collisionGrid_.SetCellSize(params_->collisionBoundsScale * diameter_);
     std::unordered_set<long long> done;
     const long long stride = total;
+    const int beads = BeadCount();
+
+    const auto applyPair = [&](int a, int b) {
+        const long long lo = a;
+        const long long hi = b;
+        if (!done.insert(lo * stride + hi).second) {
+            return;
+        }
+        const Vector2 pa = PosOf(a);
+        const Vector2 pb = PosOf(b);
+        const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
+        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+        if (len < 1e-6f || len >= diameter_) {
+            return;
+        }
+        const float mag = params_->collisionStiffness * (diameter_ - len);
+        const Vector2 dir = {d.x / len, d.y / len};
+        force[a].x -= mag * dir.x;
+        force[a].y -= mag * dir.y;
+        force[b].x += mag * dir.x;
+        force[b].y += mag * dir.y;
+    };
+
+    if (globalCollisions_) {
+        for (int a = 0; a < beads; ++a) {
+            if (neck_->beads[static_cast<size_t>(a)].removed) {
+                continue;
+            }
+            for (int b = a + 1; b < beads; ++b) {
+                if (neck_->beads[static_cast<size_t>(b)].removed) {
+                    continue;
+                }
+                applyPair(a, b);
+            }
+        }
+    }
 
     for (const std::vector<int>& group : faceBodies_) {
         collisionGrid_.Clear();
         collisionGrid_.Reserve(group.size());
         for (const int body : group) {
+            if (body >= beads) {
+                const int fi = body - beads;
+                if (fi >= 0 && fi < static_cast<int>(skipFaceBody.size()) &&
+                    skipFaceBody[static_cast<size_t>(fi)]) {
+                    continue;
+                }
+            }
             const Vector2 p = PosOf(body);
             collisionGrid_.Insert(body, p.x, p.y);
         }
         collisionGrid_.ForEachCandidatePair([&](int a, int b) {
-            const long long lo = a;
-            const long long hi = b;
-            if (!done.insert(lo * stride + hi).second) {
-                return;
-            }
-            const Vector2 pa = PosOf(a);
-            const Vector2 pb = PosOf(b);
-            const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
-            const float len = std::sqrt(d.x * d.x + d.y * d.y);
-            if (len < 1e-6f || len >= diameter_) {
-                return;
-            }
-            const float mag = params_->collisionStiffness * (diameter_ - len);
-            const Vector2 dir = {d.x / len, d.y / len};
-            force[a].x -= mag * dir.x;
-            force[a].y -= mag * dir.y;
-            force[b].x += mag * dir.x;
-            force[b].y += mag * dir.y;
+            applyPair(a, b);
         });
     }
 }
@@ -511,8 +538,57 @@ void Physics::Integrate(float dt)
         }
     }
 
+    std::vector<char> skipFaceCollision(static_cast<size_t>(faces), 0);
+    std::vector<char> incenterSpring(static_cast<size_t>(faces), 0);
+    std::unordered_set<int> r3Faces;
+    if (r3Active_) {
+        CollectR3InvolvedFaces(&r3Faces);
+    }
+    for (int fi = 0; fi < faces; ++fi) {
+        const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
+        std::vector<Vec2d> poly;
+        const bool havePoly = FaceBoundaryPolygon(fb.face, &poly);
+        const bool inside =
+            !havePoly || PointInPolygon(Vec2d{static_cast<double>(fb.pos.x),
+                                              static_cast<double>(fb.pos.y)},
+                                        poly);
+        if (!inside) {
+            skipFaceCollision[static_cast<size_t>(fi)] = 1;
+            incenterSpring[static_cast<size_t>(fi)] = 1;
+        }
+        if (r3Active_ && r3Faces.count(fb.face) != 0) {
+            incenterSpring[static_cast<size_t>(fi)] = 1;
+        }
+        if (incenterSpring[static_cast<size_t>(fi)] && havePoly) {
+            const double precision = std::max(1e-4, 0.05 * static_cast<double>(radius_));
+            const InscribedCircle circle = LargestInscribedCircle(poly, precision);
+            Vec2d target = circle.center;
+            if (!circle.found) {
+                target = {0.0, 0.0};
+                for (const Vec2d& v : poly) {
+                    target.x += v.x;
+                    target.y += v.y;
+                }
+                target.x /= static_cast<double>(poly.size());
+                target.y /= static_cast<double>(poly.size());
+            }
+            const int body = beads + fi;
+            const Vector2 p = PosOf(body);
+            const Vector2 d = {static_cast<float>(target.x) - p.x,
+                               static_cast<float>(target.y) - p.y};
+            const float len = std::sqrt(d.x * d.x + d.y * d.y);
+            if (len > 1e-6f) {
+                // Rest length 0: force = stiffness * displacement toward the incenter.
+                const float mag = params_->springStiffness * len;
+                const Vector2 dir = {d.x / len, d.y / len};
+                force[body].x += mag * dir.x;
+                force[body].y += mag * dir.y;
+            }
+        }
+    }
+
     // Hard-body collisions within each face (spatial broad phase).
-    ApplyFaceCollisions(force, total);
+    ApplyFaceCollisions(force, total, skipFaceCollision);
 
     // Drag toward the cursor.
     if (dragBody_ >= 0 && dragBody_ < total) {
@@ -967,30 +1043,63 @@ const FaceBead* Physics::FaceBeadFor(int face) const
     return nullptr;
 }
 
-bool Physics::FaceBeadInsideFace(const FaceBead& fb) const
+bool Physics::FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const
 {
+    if (out == nullptr || face < 0 || face >= static_cast<int>(loop_->faces.size()) ||
+        face == exteriorFace_) {
+        return false;
+    }
+    out->clear();
     std::vector<int> boundary;
     std::vector<float> unusedDots;
-    if (fb.face >= 0 && fb.face < static_cast<int>(loop_->faces.size())) {
-        WalkFaceBoundaryFromPhiCycle(loop_->faces[static_cast<size_t>(fb.face)], *neck_,
-                                     crossingOf_, boundary, unusedDots, nullptr, 0.0f, false);
-    }
+    WalkFaceBoundaryFromPhiCycle(loop_->faces[static_cast<size_t>(face)], *neck_,
+                                 crossingOf_, boundary, unusedDots, nullptr, 0.0f, false);
     if (boundary.size() < 3) {
-        boundary = fb.boundaryBeads;
+        const FaceBead* fb = FaceBeadFor(face);
+        if (fb != nullptr) {
+            boundary = fb->boundaryBeads;
+        }
     }
-    if (boundary.size() < 3) {
-        return true;
-    }
-    std::vector<Vec2d> poly;
-    poly.reserve(boundary.size());
+    out->reserve(boundary.size());
     for (const int bead : boundary) {
         if (bead < 0 || bead >= BeadCount() || neck_->beads[static_cast<size_t>(bead)].removed) {
             continue;
         }
         const Vector2 p = PosOf(bead);
-        poly.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+        out->push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
     }
-    if (poly.size() < 3) {
+    return out->size() >= 3;
+}
+
+void Physics::CollectR3InvolvedFaces(std::unordered_set<int>* out) const
+{
+    if (out == nullptr) {
+        return;
+    }
+    out->clear();
+    const auto addHalf = [&](int h) {
+        const auto it = faceOfHalfEdge_.find(h);
+        if (it != faceOfHalfEdge_.end() && it->second != exteriorFace_) {
+            out->insert(it->second);
+        }
+    };
+    if (r3Info_.face >= 0 && r3Info_.face != exteriorFace_) {
+        out->insert(r3Info_.face);
+    }
+    for (int i = 0; i < 3; ++i) {
+        addHalf(r3Info_.h[i]);
+        addHalf(-r3Info_.h[i]);
+        addHalf(r3Info_.a[i]);
+        addHalf(-r3Info_.a[i]);
+        addHalf(r3Info_.b[i]);
+        addHalf(-r3Info_.b[i]);
+    }
+}
+
+bool Physics::FaceBeadInsideFace(const FaceBead& fb) const
+{
+    std::vector<Vec2d> poly;
+    if (!FaceBoundaryPolygon(fb.face, &poly)) {
         return true;
     }
     const Vec2d center{static_cast<double>(fb.pos.x), static_cast<double>(fb.pos.y)};
@@ -1951,9 +2060,9 @@ void Physics::R3PreHoneycombStep()
 
 bool Physics::BeginR3Slide()
 {
-    if (structureDirty_) {
-        RebuildStructures();
-    }
+    // Snapshot complete face collision groups from the intact necklace.
+    // Cuts below break face walks, so we must not rebuild faceBodies_ after.
+    RebuildStructures();
 
     for (int i = 0; i < 3; ++i) {
         r3Info_.aTerminal[i] =
@@ -2069,11 +2178,10 @@ bool Physics::BeginR3Slide()
         return false;
     }
 
-    // Frozen collision groups for the slide.
-    RebuildStructures();
+    // Springs/chains follow the cut terminals; collision groups stay pre-cut.
+    RebuildStructuresR3();
     r3Phase_ = R3Phase::Slide;
     r3StallFrames_ = 0;
-    structureDirty_ = true;
     return true;
 }
 
@@ -2143,6 +2251,8 @@ std::vector<int> Physics::WalkFromTerminal(int terminal) const
 
 void Physics::RebuildStructuresR3()
 {
+    // Chains and springs only. Face collision groups stay frozen from the
+    // pre-cut snapshot; rebuilding them here would drop the cut a/b edges.
     const int n = loop_->numEdges;
     chains_.assign(n + 1, {});
     for (int k = 1; k <= n; ++k) {
