@@ -496,11 +496,19 @@ bool RunPermutationTests()
                     }
                     Check(edgeWalksOk, "R3 end-to-end: all edge chains run vertex to vertex");
 
-                    // Physics rebuilds cleanly on the moved diagram.
+                    // Physics rebuilds cleanly on the moved diagram, and the
+                    // post-repair phase (gap fill + sharp-bend strip) finishes.
                     bool physicsOk = true;
                     try {
                         Physics phys2(*moved, neck2, params, newExterior);
                         phys2.Step();
+                        phys2.StartR3PostRepair();
+                        int postFrames = 0;
+                        while (phys2.R3Active() && postFrames < 4000) {
+                            phys2.R3Step();
+                            ++postFrames;
+                        }
+                        physicsOk = !phys2.R3Active();
                     }
                     catch (const std::exception&) {
                         physicsOk = false;

@@ -1865,6 +1865,139 @@ bool Physics::NeighborHoneycombBlocksRemoval(int edge)
     return false;
 }
 
+bool Physics::HoneycombFloorBlocksRemoval(int edge)
+{
+    std::unordered_set<int> faces;
+    AppendIncidentFaces(edge, faces);
+    for (const int f : faces) {
+        if (f == exteriorFace_) {
+            continue;
+        }
+        WalkFaceBoundaryNoDots(f);
+        const FaceBead* fb = FaceBeadFor(f);
+        if (fb != nullptr && fb->boundaryBeads.size() <= 6) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Physics::InsertLargestGapIfNeeded()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    const float gapThreshold = params_->gapSize * diameter_;
+    float bestDist = gapThreshold;
+    int bestEdge = -1;
+    int bestA = -1;
+    int bestC = -1;
+    for (int k = 1; k <= loop_->numEdges; ++k) {
+        if (k >= static_cast<int>(chains_.size())) {
+            break;
+        }
+        const std::vector<int>& chain = chains_[k];
+        for (size_t i = 0; i + 1 < chain.size(); ++i) {
+            const Vector2 a = PosOf(chain[i]);
+            const Vector2 b = PosOf(chain[i + 1]);
+            const float d =
+                std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+            if (d > bestDist) {
+                bestDist = d;
+                bestEdge = k;
+                bestA = chain[i];
+                bestC = chain[i + 1];
+            }
+        }
+    }
+    if (bestEdge < 0) {
+        return false;
+    }
+    const int inserted = InsertEdgeBeadBetween(bestA, bestC, bestEdge);
+    if (inserted < 0) {
+        return false;
+    }
+    RefreshEdgeChain(bestEdge);
+    RebuildSpringsFromChains();
+    RefreshFaceBodiesForEdge(bestEdge);
+    RebuildFaceBodiesFromCache();
+    structureDirty_ = false;
+    return true;
+}
+
+bool Physics::RemoveSharpBendIfAllowed()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    sharpDotThreshold_ = std::cos(kPiF / 3.0f + params_->bendAngleEpsilon);
+    for (int k = 1; k <= loop_->numEdges; ++k) {
+        if (HoneycombFloorBlocksRemoval(k)) {
+            continue;
+        }
+        const int removed = RemoveBeadFromEdge(k, true);
+        if (removed < 0) {
+            continue;
+        }
+        RefreshEdgeChain(k);
+        RebuildSpringsFromChains();
+        RefreshFaceBodiesForEdge(k);
+        RebuildFaceBodiesFromCache();
+        structureDirty_ = false;
+        return true;
+    }
+    return false;
+}
+
+void Physics::StartR3PostRepair()
+{
+    if (autoActive_ || r3Active_) {
+        return;
+    }
+    ClearR3State();
+    r3Active_ = true;
+    r3Complete_ = false;
+    r3Phase_ = R3Phase::PostRepair;
+    r3PreSub_ = R3PreSub::NeedInsert;
+    structureDirty_ = true;
+}
+
+void Physics::R3PostRepairStep()
+{
+    if (++r3StallFrames_ > 800) {
+        r3Active_ = false;
+        r3Complete_ = false;
+        ClearR3State();
+        structureDirty_ = true;
+        return;
+    }
+    if (r3PreSub_ == R3PreSub::NeedInsert) {
+        int n = 0;
+        bool any = false;
+        while (n++ < 16 && InsertLargestGapIfNeeded()) {
+            any = true;
+        }
+        Step();
+        if (!any) {
+            r3PreSub_ = R3PreSub::NeedRemove;
+        }
+        return;
+    }
+
+    int n = 0;
+    bool any = false;
+    while (n++ < 8 && RemoveSharpBendIfAllowed()) {
+        any = true;
+    }
+    Step();
+    if (!any) {
+        r3Active_ = false;
+        r3Complete_ = false;
+        ClearR3State();
+        structureDirty_ = true;
+    }
+}
+
 bool Physics::StartR3Move(int face)
 {
     if (r3Active_ || autoActive_) {
@@ -2349,6 +2482,10 @@ void Physics::R3Step()
     }
     if (r3Phase_ == R3Phase::PreHoneycomb) {
         R3PreHoneycombStep();
+        return;
+    }
+    if (r3Phase_ == R3Phase::PostRepair) {
+        R3PostRepairStep();
         return;
     }
 

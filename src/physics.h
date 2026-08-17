@@ -92,6 +92,9 @@ public:
     // After FinalizeR3: top up exterior arcs sa–sf so monogons have ≥5 edge
     // beads and bigons have ≥2. Uses newLoop for topology; edits neck_.
     void EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop);
+    // After FinalizeR3 + a new Physics on the rewritten loop: fill oversized
+    // gaps, then strip sharp bends without breaking honeycomb faces.
+    void StartR3PostRepair();
 
     // Excess area (polyArea minus boundary pie slices) for a face bead.
     double FaceExcessArea(const FaceBead& fb) const;
@@ -227,10 +230,12 @@ private:
     // ---- Reidemeister 3 state machine ----
     // Phase A: tighten the triangle to a honeycomb (one edge bead per side).
     // Phase B: cut-and-slide terminals toward those three beads (meetings).
+    // Phase C: after FinalizeR3, fill gaps then strip sharp bends.
     enum class R3Phase
     {
         PreHoneycomb,
-        Slide
+        Slide,
+        PostRepair
     };
     enum class R3PreSub
     {
@@ -269,6 +274,10 @@ private:
     // True when removing from edge would strip a neighbor face that is already
     // at the honeycomb floor (≤6 boundary beads). The clicked R3 face is ignored.
     bool NeighborHoneycombBlocksRemoval(int edge);
+    bool HoneycombFloorBlocksRemoval(int edge);
+    bool InsertLargestGapIfNeeded();
+    bool RemoveSharpBendIfAllowed();
+    void R3PostRepairStep();
     void ClearR3State();
     bool FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const;
     void CollectR3InvolvedFaces(std::unordered_set<int>* out) const;

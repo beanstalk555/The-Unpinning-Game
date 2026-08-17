@@ -50,7 +50,7 @@ namespace
         {"Spring stiffness", 1.0f, 2000.0f, false, false},
         {"Collision stiffness", 1.0f, 500.0f, false, false},
         {"Drag stiffness", 1.0f, 500.0f, false, false},
-        {"Damping", 0.0f, 8000.0f, false, false},
+        {"Damping", 0.0f, 100.0f, false, false},
         {"Timestep (1/dt)", 10.0f, 480.0f, false, false},
         {"Substeps", 1.0f, 100.0f, true, false},
         {"Max speed", 0.5f, 50.0f, false, false},

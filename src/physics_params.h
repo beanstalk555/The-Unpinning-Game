@@ -14,12 +14,12 @@ struct PhysicsParams
     float springStiffness = 500.0f;
     float collisionStiffness = 250.0f;
     float dragStiffness = 250.0f;
-    float damping = 20.43f;
+    float damping = 85.0f;
     float dt = 1.0f / 60.0f;
     int substeps = 20;
     float maxSpeed = 20.0f;
 
-    double tensionThreshold = 6.966;
+    double tensionThreshold = 3.323;
     int relaxStepsMax = 80;
     int autoStepsPerFrame = 30;
     // Beads with interior angle <= pi/3 + bendAngleEpsilon are removed first.

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <deque>
 #include <exception>
 #include <memory>
 #include <random>
@@ -542,6 +543,108 @@ namespace
         // The 1-face case (a simple closed curve) has no crossings, so it
         // bypasses the permutation pipeline and is drawn directly.
         bool unknotMode = false;
+        bool wasAutoTightening = false;
+        bool wasR3Active = false;
+
+        // Camera in grid coordinates: `viewCell` pixels per grid unit, look-at
+        // is the grid point mapped to the canvas center. Animated on fit.
+        const void* viewLayoutKey = nullptr;
+        bool viewReady = false;
+        float viewCell = 1.0f;
+        float viewLookX = 0.0f;
+        float viewLookY = 0.0f;
+        int viewGridHeight = 0;
+        bool viewAnimating = false;
+        float viewAnimT = 0.0f;
+        float viewCell0 = 1.0f;
+        float viewCell1 = 1.0f;
+        float viewLookX0 = 0.0f;
+        float viewLookX1 = 0.0f;
+        float viewLookY0 = 0.0f;
+        float viewLookY1 = 0.0f;
+
+        static constexpr int kR3UndoLimit = 5;
+        struct R3UndoSnapshot
+        {
+            std::unique_ptr<Multiloop> loop;
+            GridLayout layout;
+            Necklace necklace;
+            int selectedFace = -1;
+            float viewCell = 1.0f;
+            float viewLookX = 0.0f;
+            float viewLookY = 0.0f;
+            int viewGridHeight = 0;
+        };
+        std::deque<R3UndoSnapshot> r3Undo;
+
+        void ClearR3Undo() { r3Undo.clear(); }
+
+        void PushR3Undo()
+        {
+            if (!loop || !layout || !necklace) {
+                return;
+            }
+            R3UndoSnapshot snap;
+            snap.loop.reset(new Multiloop(*loop));
+            snap.layout = *layout;
+            snap.necklace = *necklace;
+            snap.selectedFace = selectedFace;
+            snap.viewCell = viewCell;
+            snap.viewLookX = viewLookX;
+            snap.viewLookY = viewLookY;
+            snap.viewGridHeight = viewGridHeight;
+            r3Undo.push_back(std::move(snap));
+            while (static_cast<int>(r3Undo.size()) > kR3UndoLimit) {
+                r3Undo.pop_front();
+            }
+        }
+
+        void UndoR3()
+        {
+            if (r3Undo.empty()) {
+                return;
+            }
+            if (physics && physics->AutoTightening()) {
+                physics->StopAutoTighten();
+            }
+            R3UndoSnapshot snap = std::move(r3Undo.back());
+            r3Undo.pop_back();
+            if (!snap.loop) {
+                return;
+            }
+            physics.reset();
+            loop = std::move(snap.loop);
+            layout.reset(new GridLayout(std::move(snap.layout)));
+            necklace.reset(new Necklace(std::move(snap.necklace)));
+            selectedFace = snap.selectedFace;
+            debugFaceBeadIndex = -1;
+            dropdownOpen = false;
+            error.clear();
+            wasAutoTightening = false;
+            wasR3Active = false;
+            faceLabels.clear();
+            for (const std::vector<int>& face : loop->faces) {
+                faceLabels.push_back(CycleToString(face));
+            }
+            sigmaBox.text = loop->sigma.ToString();
+            sigmaBox.caret = 0;
+            sigmaBox.anchor = 0;
+            sigmaBox.scrollX = 0.0f;
+            viewLayoutKey = layout.get();
+            viewReady = true;
+            viewCell = snap.viewCell;
+            viewLookX = snap.viewLookX;
+            viewLookY = snap.viewLookY;
+            viewGridHeight = snap.viewGridHeight;
+            viewAnimating = false;
+            try {
+                physics.reset(new Physics(*loop, *necklace, physicsParams, selectedFace));
+            }
+            catch (const std::exception& e) {
+                physics.reset();
+                error = e.what();
+            }
+        }
 
         // Free-hand drawing mode.
         bool drawing = false;
@@ -575,6 +678,7 @@ namespace
             dropdownOpen = false;
             dropdownScroll = 0.0f;
             unknotMode = false;
+            ClearR3Undo();
             try {
                 const Permutation sigma = Permutation::FromString(sigmaBox.text);
                 const std::string message = ValidateMultiloopSigma(sigma);
@@ -607,6 +711,7 @@ namespace
             necklace.reset();
             physics.reset();
             error.clear();
+            ClearR3Undo();
             try {
                 layout.reset(new GridLayout(ComputeGridLayout(*loop, index)));
                 necklace.reset(new Necklace(BuildNecklace(*loop, *layout, index)));
@@ -665,6 +770,7 @@ namespace
             sigmaBox.scrollX = 0.0f;
             try {
                 physics.reset(new Physics(*loop, *necklace, physicsParams, selectedFace));
+                physics->StartR3PostRepair();
             }
             catch (const std::exception& e) {
                 physics.reset();
@@ -687,6 +793,7 @@ namespace
         void GenerateRandom()
         {
             error.clear();
+            ClearR3Undo();
             int count = 0;
             try {
                 count = std::stoi(countBox.text);
@@ -1092,16 +1199,143 @@ namespace
         }
     };
 
-    View MakeView(const GridLayout& layout, Rectangle canvas)
+    float EaseInOutCubic(float t)
+    {
+        t = Clampf(t, 0.0f, 1.0f);
+        if (t < 0.5f) {
+            return 4.0f * t * t * t;
+        }
+        const float u = -2.0f * t + 2.0f;
+        return 1.0f - (u * u * u) * 0.5f;
+    }
+
+    void LayoutCamera(const GridLayout& layout, Rectangle canvas, float* cell, float* lookX,
+                      float* lookY)
     {
         const float margin = 45.0f;
         const float cellW = (canvas.width - 2 * margin) / std::max(1, layout.width);
         const float cellH = (canvas.height - 2 * margin) / std::max(1, layout.height);
+        *cell = Clampf(std::min(cellW, cellH), 5.0f, 110.0f);
+        *lookX = 0.5f * static_cast<float>(layout.width);
+        *lookY = 0.5f * static_cast<float>(layout.height);
+    }
+
+    bool BeadCamera(const GridLayout& layout, const Necklace& necklace, Rectangle canvas,
+                    float* cell, float* lookX, float* lookY)
+    {
+        bool any = false;
+        float minX = 0.0f;
+        float minY = 0.0f;
+        float maxX = 0.0f;
+        float maxY = 0.0f;
+        const auto include = [&](float x, float y) {
+            if (!any) {
+                minX = maxX = x;
+                minY = maxY = y;
+                any = true;
+            }
+            else {
+                minX = std::min(minX, x);
+                maxX = std::max(maxX, x);
+                minY = std::min(minY, y);
+                maxY = std::max(maxY, y);
+            }
+        };
+        for (const Bead& bead : necklace.beads) {
+            if (bead.removed) {
+                continue;
+            }
+            include(bead.pos.x, bead.pos.y);
+        }
+        for (const FaceBead& fb : necklace.faceBeads) {
+            include(fb.pos.x, fb.pos.y);
+        }
+        if (!any) {
+            LayoutCamera(layout, canvas, cell, lookX, lookY);
+            return false;
+        }
+        const float pad = std::max(4.0f * necklace.radius, 0.75f);
+        minX -= pad;
+        maxX += pad;
+        minY -= pad;
+        maxY += pad;
+        const float w = std::max(maxX - minX, 0.25f);
+        const float h = std::max(maxY - minY, 0.25f);
+        const float margin = 45.0f;
+        const float cellW = (canvas.width - 2 * margin) / w;
+        const float cellH = (canvas.height - 2 * margin) / h;
+        *cell = Clampf(std::min(cellW, cellH), 3.0f, 250.0f);
+        *lookX = 0.5f * (minX + maxX);
+        *lookY = 0.5f * (minY + maxY);
+        return true;
+    }
+
+    void BeginViewFit(App& app, Rectangle canvas)
+    {
+        if (!app.layout) {
+            return;
+        }
+        float cell = app.viewCell;
+        float lookX = app.viewLookX;
+        float lookY = app.viewLookY;
+        if (app.necklace) {
+            BeadCamera(*app.layout, *app.necklace, canvas, &cell, &lookX, &lookY);
+        }
+        else {
+            LayoutCamera(*app.layout, canvas, &cell, &lookX, &lookY);
+        }
+        const float dCell = std::fabs(cell - app.viewCell);
+        const float dLook = std::hypot(lookX - app.viewLookX, lookY - app.viewLookY);
+        if (dCell < 0.15f && dLook < 0.02f) {
+            app.viewCell = cell;
+            app.viewLookX = lookX;
+            app.viewLookY = lookY;
+            app.viewAnimating = false;
+            return;
+        }
+        app.viewCell0 = app.viewCell;
+        app.viewLookX0 = app.viewLookX;
+        app.viewLookY0 = app.viewLookY;
+        app.viewCell1 = cell;
+        app.viewLookX1 = lookX;
+        app.viewLookY1 = lookY;
+        app.viewAnimT = 0.0f;
+        app.viewAnimating = true;
+    }
+
+    View MakeView(App& app, const GridLayout& layout, Rectangle canvas)
+    {
+        const void* key = &layout;
+        if (!app.viewReady || app.viewLayoutKey != key) {
+            LayoutCamera(layout, canvas, &app.viewCell, &app.viewLookX, &app.viewLookY);
+            app.viewGridHeight = layout.height;
+            app.viewLayoutKey = key;
+            app.viewReady = true;
+            app.viewAnimating = false;
+        }
+        app.viewGridHeight = layout.height;
+
+        if (app.viewAnimating) {
+            const float dt = std::min(GetFrameTime(), 0.05f);
+            app.viewAnimT += dt / 0.50f;
+            const float u = EaseInOutCubic(app.viewAnimT);
+            app.viewCell = app.viewCell0 + (app.viewCell1 - app.viewCell0) * u;
+            app.viewLookX = app.viewLookX0 + (app.viewLookX1 - app.viewLookX0) * u;
+            app.viewLookY = app.viewLookY0 + (app.viewLookY1 - app.viewLookY0) * u;
+            if (app.viewAnimT >= 1.0f) {
+                app.viewCell = app.viewCell1;
+                app.viewLookX = app.viewLookX1;
+                app.viewLookY = app.viewLookY1;
+                app.viewAnimating = false;
+            }
+        }
+
         View view;
-        view.cell = Clampf(std::min(cellW, cellH), 5.0f, 110.0f);
-        view.originX = canvas.x + (canvas.width - view.cell * layout.width) / 2.0f;
-        view.originY = canvas.y + (canvas.height - view.cell * layout.height) / 2.0f;
-        view.gridHeight = layout.height;
+        view.cell = app.viewCell;
+        view.gridHeight = app.viewGridHeight;
+        view.originX = canvas.x + canvas.width * 0.5f - app.viewLookX * view.cell;
+        view.originY =
+            canvas.y + canvas.height * 0.5f - (view.gridHeight - app.viewLookY) * view.cell;
         return view;
     }
 
@@ -1354,6 +1588,9 @@ namespace
         const float row1 = pad + 40.0f;
         const float row2 = row1 + 42.0f;
         const float row3 = row2 + 38.0f;
+        const float canvasTop = row3 + 36.0f;
+        const Rectangle canvas = {0.0f, canvasTop, static_cast<float>(screenWidth),
+                                  static_cast<float>(screenHeight) - canvasTop};
 
         BeginDrawing();
         ClearBackground(kBackground);
@@ -1594,17 +1831,47 @@ namespace
             if (resetEnabled && click && CheckCollisionPointRec(mouse, resetR)) {
                 app.ResetToGrid();
             }
+            const std::string fitLabel = "Zoom to fit";
+            const float fitW = TextWidth(fitLabel, 18.0f) + 24.0f;
+            const float fitX = resetX + resetW + 8.0f;
+            const Rectangle fitR = {fitX, row3, fitW, 30.0f};
+            const bool fitEnabled = !drawing && app.layout && app.necklace;
+            const bool fitHover = fitEnabled && CheckCollisionPointRec(mouse, fitR);
+            DrawRectangleRounded(fitR, 0.35f, 6,
+                                 !fitEnabled ? kDisabledFill
+                                             : (fitHover ? ColorBrightness(kAccent, -0.15f)
+                                                         : kAccent));
+            DrawTextS(fitLabel, fitR.x + 12.0f, fitR.y + 5.0f, 18.0f,
+                      fitEnabled ? WHITE : kBackground);
+            if (fitEnabled && click && CheckCollisionPointRec(mouse, fitR)) {
+                BeginViewFit(app, canvas);
+            }
+            const std::string undoLabel = "Undo R3";
+            const float undoW = TextWidth(undoLabel, 18.0f) + 24.0f;
+            const float undoX = fitX + fitW + 8.0f;
+            const Rectangle undoR = {undoX, row3, undoW, 30.0f};
+            const bool undoEnabled = !drawing && !app.r3Undo.empty();
+            const bool undoHover = undoEnabled && CheckCollisionPointRec(mouse, undoR);
+            DrawRectangleRounded(undoR, 0.35f, 6,
+                                 !undoEnabled ? kDisabledFill
+                                              : (undoHover ? ColorBrightness(kAccent, -0.15f)
+                                                           : kAccent));
+            DrawTextS(undoLabel, undoR.x + 12.0f, undoR.y + 5.0f, 18.0f,
+                      undoEnabled ? WHITE : kBackground);
+            if (undoEnabled && click && CheckCollisionPointRec(mouse, undoR)) {
+                app.UndoR3();
+            }
             if (app.physics) {
                 char buf[128];
                 std::snprintf(buf, sizeof(buf),
                               "tension: %.2f   (stretch %.2f  +  compression %.2f)",
                               app.physics->TotalTension(), app.physics->StretchTension(),
                               app.physics->CompressionTension());
-                DrawTextS(buf, resetX + resetW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
+                DrawTextS(buf, undoX + undoW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
             }
             else {
                 DrawTextS("Drag beads to perturb; auto-tighten removes slack.",
-                          resetX + resetW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
+                          undoX + undoW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
             }
             if (!app.debug) {
                 app.tuningUI.open = false;
@@ -1626,9 +1893,6 @@ namespace
         }
 
         // ---- Canvas ----
-        const float canvasTop = row3 + 36.0f;
-        const Rectangle canvas = {0.0f, canvasTop, static_cast<float>(screenWidth),
-                                  static_cast<float>(screenHeight) - canvasTop};
         if (drawing) {
             if (click && CheckCollisionPointRec(mouse, canvas)) {
                 const double now = GetTime();
@@ -1661,7 +1925,7 @@ namespace
             DrawUnknot(app, canvas);
         }
         else if (app.layout && app.necklace) {
-            const View view = MakeView(*app.layout, canvas);
+            const View view = MakeView(app, *app.layout, canvas);
             const bool tuningBlocks = PhysicsTuningBlocksInput(app.tuningUI, mouse);
             if (app.physics) {
                 const Vector2 gridMouse = view.ToGrid(mouse);
@@ -1703,7 +1967,12 @@ namespace
                             // Reidemeister 3 slide.
                             if (fb.phiCycle.size() == 3 && !app.physics->AutoTightening() &&
                                 !app.physics->R3Active()) {
-                                app.physics->StartR3Move(fb.face);
+                                app.PushR3Undo();
+                                if (!app.physics->StartR3Move(fb.face)) {
+                                    if (!app.r3Undo.empty()) {
+                                        app.r3Undo.pop_back();
+                                    }
+                                }
                             }
                         }
                     }
@@ -1726,6 +1995,13 @@ namespace
                 else if (app.physics) {
                     app.physics->Step();
                 }
+                const bool autoNow = app.physics && app.physics->AutoTightening();
+                const bool r3Now = app.physics && app.physics->R3Active();
+                if ((app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now)) {
+                    BeginViewFit(app, canvas);
+                }
+                app.wasAutoTightening = autoNow;
+                app.wasR3Active = r3Now;
                 if (debugTiming && app.physics) {
                     const auto physicsT1 = std::chrono::high_resolution_clock::now();
                     const double frameMs =
