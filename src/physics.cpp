@@ -30,7 +30,7 @@ namespace
             *acc_ += std::chrono::duration<double, std::milli>(t1 - t0_).count();
         }
 
-    private:
+        private:
         double* acc_;
         std::chrono::high_resolution_clock::time_point t0_;
     };
@@ -538,12 +538,42 @@ void Physics::Integrate(float dt)
         }
     }
 
+    // Hexagonal honeycomb spokes: face bead to the 6-cycle (rest = diameter).
+    if (r3Active_ && R3HoneycombSpokesActive()) {
+        const int faceBody = beads + r3HoneycombFaceFi_;
+        if (faceBody >= 0 && faceBody < total) {
+            for (int i = 0; i < 6; ++i) {
+                const int spoke = r3HoneycombSpokes_[i];
+                if (spoke < 0 || spoke >= beads ||
+                    neck_->beads[static_cast<size_t>(spoke)].removed) {
+                    continue;
+                }
+                const Vector2 pa = PosOf(faceBody);
+                const Vector2 pb = PosOf(spoke);
+                const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
+                const float len = std::sqrt(d.x * d.x + d.y * d.y);
+                if (len < 1e-6f) {
+                    continue;
+                }
+                const float mag = params_->r3FortifyStiffness * (len - diameter_);
+                const Vector2 dir = {d.x / len, d.y / len};
+                force[faceBody].x += mag * dir.x;
+                force[faceBody].y += mag * dir.y;
+                force[spoke].x -= mag * dir.x;
+                force[spoke].y -= mag * dir.y;
+            }
+        }
+    }
+
     std::vector<char> skipFaceCollision(static_cast<size_t>(faces), 0);
-    std::vector<char> incenterSpring(static_cast<size_t>(faces), 0);
     std::unordered_set<int> r3Faces;
     if (r3Active_) {
         CollectR3InvolvedFaces(&r3Faces);
     }
+    // Face beads being pulled to their incenter skip collisions until they
+    // arrive; crossing the polygon boundary is not enough (they still overlap
+    // edge beads and would chatter).
+    const float incenterArriveTol = 0.2f * diameter_;
     for (int fi = 0; fi < faces; ++fi) {
         const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
         std::vector<Vec2d> poly;
@@ -552,14 +582,17 @@ void Physics::Integrate(float dt)
             !havePoly || PointInPolygon(Vec2d{static_cast<double>(fb.pos.x),
                                               static_cast<double>(fb.pos.y)},
                                         poly);
-        if (!inside) {
-            skipFaceCollision[static_cast<size_t>(fi)] = 1;
-            incenterSpring[static_cast<size_t>(fi)] = 1;
-        }
+        bool pullToIncenter = !inside;
         if (r3Active_ && r3Faces.count(fb.face) != 0) {
-            incenterSpring[static_cast<size_t>(fi)] = 1;
+            pullToIncenter = true;
         }
-        if (incenterSpring[static_cast<size_t>(fi)] && havePoly) {
+        if (R3HoneycombSpokesActive() && fb.face == r3Info_.face) {
+            pullToIncenter = false;
+        }
+        if (!pullToIncenter) {
+            continue;
+        }
+        if (havePoly) {
             const double precision = std::max(1e-4, 0.05 * static_cast<double>(radius_));
             const InscribedCircle circle = LargestInscribedCircle(poly, precision);
             Vec2d target = circle.center;
@@ -584,6 +617,12 @@ void Physics::Integrate(float dt)
                 force[body].x += mag * dir.x;
                 force[body].y += mag * dir.y;
             }
+            if (len > incenterArriveTol) {
+                skipFaceCollision[static_cast<size_t>(fi)] = 1;
+            }
+        }
+        else if (!inside) {
+            skipFaceCollision[static_cast<size_t>(fi)] = 1;
         }
     }
 
@@ -1657,6 +1696,10 @@ void Physics::ClearR3State()
     r3SettleFrames_ = 0;
     r3Phase_ = R3Phase::PreHoneycomb;
     r3PreSub_ = R3PreSub::NeedRemove;
+    r3HoneycombFaceFi_ = -1;
+    for (int i = 0; i < 6; ++i) {
+        r3HoneycombSpokes_[i] = -1;
+    }
 }
 
 std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
@@ -2006,6 +2049,62 @@ bool Physics::StartR3Move(int face)
     ClearR3State();
 
     R3FaceInfo info;
+    if (!AnalyzeR3Face(*loop_, nullptr, face, &info)) {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        if (info.crossing[i] < 0 ||
+            info.crossing[i] >= static_cast<int>(neck_->crossingBead.size())) {
+            return false;
+        }
+        info.vertexBead[i] = neck_->crossingBead[static_cast<size_t>(info.crossing[i])];
+    }
+
+    const auto padToward = [&](int vertexBead, int halfEdge, int minInteriors) -> bool {
+        for (int guard = 0; guard < 8; ++guard) {
+            const std::vector<int> chain = WalkSideChain(vertexBead, halfEdge);
+            if (chain.size() < 2) {
+                return false;
+            }
+            if (static_cast<int>(chain.size()) - 2 >= minInteriors) {
+                return true;
+            }
+            if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(halfEdge)) < 0) {
+                return false;
+            }
+        }
+        return false;
+    };
+
+    // Pad any empty face-cycle side up to one interior bead.
+    for (int i = 0; i < 3; ++i) {
+        if (!padToward(info.vertexBead[i], info.h[i], 1)) {
+            return false;
+        }
+    }
+
+    // An exterior a/b edge that runs between two triangle vertices (a bigon, or
+    // a loop at one vertex) needs two interior beads. With only one, both
+    // vertices' NeighborToward results alias to the same terminal and R3 refuses.
+    for (int i = 0; i < 3; ++i) {
+        for (const int h : {info.a[i], info.b[i]}) {
+            const std::vector<int> chain = WalkSideChain(info.vertexBead[i], h);
+            int minInteriors = 1;
+            if (chain.size() >= 2) {
+                const int other = chain.back();
+                for (int j = 0; j < 3; ++j) {
+                    if (info.vertexBead[j] == other) {
+                        minInteriors = 2;
+                        break;
+                    }
+                }
+            }
+            if (!padToward(info.vertexBead[i], h, minInteriors)) {
+                return false;
+            }
+        }
+    }
+
     if (!AnalyzeR3Face(*loop_, neck_, face, &info)) {
         return false;
     }
@@ -2031,22 +2130,6 @@ bool Physics::StartR3Move(int face)
         Permutation newSigma;
         if (!ComputeR3Sigma(*loop_, info, &newSigma)) {
             return false;
-        }
-    }
-
-    // Pad any empty face-cycle side up to one interior bead.
-    for (int i = 0; i < 3; ++i) {
-        for (int guard = 0; guard < 8; ++guard) {
-            const std::vector<int> chain = WalkSideChain(info.vertexBead[i], info.h[i]);
-            if (chain.size() < 2) {
-                return false;
-            }
-            if (static_cast<int>(chain.size()) - 2 >= 1) {
-                break;
-            }
-            if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(info.h[i])) < 0) {
-                return false;
-            }
         }
     }
 
@@ -2107,9 +2190,7 @@ void Physics::R3PreHoneycombStep()
             }
         }
         if (allOne) {
-            if (!BeginR3Slide()) {
-                CancelR3Move();
-            }
+            BeginFortifyOrSlide();
             return;
         }
         if (oversized.empty()) {
@@ -2188,6 +2269,104 @@ void Physics::R3PreHoneycombStep()
 
     if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
         r3PreSub_ = R3PreSub::NeedRemove;
+    }
+}
+
+bool Physics::R3HoneycombSpokesActive() const
+{
+    if (r3HoneycombFaceFi_ < 0 ||
+        r3HoneycombFaceFi_ >= static_cast<int>(neck_->faceBeads.size())) {
+        return false;
+    }
+    for (int i = 0; i < 6; ++i) {
+        if (r3HoneycombSpokes_[i] < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Physics::BindR3HoneycombSpokes()
+{
+    r3HoneycombFaceFi_ = -1;
+    for (int i = 0; i < 6; ++i) {
+        r3HoneycombSpokes_[i] = -1;
+    }
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        if (neck_->faceBeads[fi].face == r3Info_.face) {
+            r3HoneycombFaceFi_ = static_cast<int>(fi);
+            break;
+        }
+    }
+    if (r3HoneycombFaceFi_ < 0) {
+        return false;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const int j = (i + 1) % 3;
+        const std::vector<int> chain =
+            WalkSideChain(r3Info_.vertexBead[i], r3Info_.h[i]);
+        if (static_cast<int>(chain.size()) != 3 ||
+            chain[0] != r3Info_.vertexBead[i] ||
+            chain.back() != r3Info_.vertexBead[j] ||
+            neck_->beads[static_cast<size_t>(chain[1])].isVertex ||
+            neck_->beads[static_cast<size_t>(chain[1])].removed) {
+            r3HoneycombFaceFi_ = -1;
+            return false;
+        }
+        r3HoneycombSpokes_[2 * i] = r3Info_.vertexBead[i];
+        r3HoneycombSpokes_[2 * i + 1] = chain[1];
+    }
+    return true;
+}
+
+bool Physics::R3HoneycombSpokesSettled() const
+{
+    if (!R3HoneycombSpokesActive()) {
+        return false;
+    }
+    const int faceBody = BeadCount() + r3HoneycombFaceFi_;
+    const float band = 0.35f * diameter_;
+    const Vector2 pa = PosOf(faceBody);
+    for (int i = 0; i < 6; ++i) {
+        const int spoke = r3HoneycombSpokes_[i];
+        if (spoke < 0 || spoke >= BeadCount() ||
+            neck_->beads[static_cast<size_t>(spoke)].removed) {
+            return false;
+        }
+        const Vector2 pb = PosOf(spoke);
+        const float dx = pb.x - pa.x;
+        const float dy = pb.y - pa.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (std::fabs(len - diameter_) > band) {
+            return false;
+        }
+    }
+    return true;
+}
+
+void Physics::BeginFortifyOrSlide()
+{
+    if (BindR3HoneycombSpokes()) {
+        r3Phase_ = R3Phase::Fortify;
+        r3StallFrames_ = 0;
+        r3SettleFrames_ = 0;
+        return;
+    }
+    if (!BeginR3Slide()) {
+        CancelR3Move();
+    }
+}
+
+void Physics::R3FortifyStep()
+{
+    for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
+        Step();
+    }
+    r3SettleFrames_ += params_->autoStepsPerFrame;
+    if (R3HoneycombSpokesSettled() || r3SettleFrames_ >= params_->relaxStepsMax) {
+        if (!BeginR3Slide()) {
+            CancelR3Move();
+        }
     }
 }
 
@@ -2482,6 +2661,10 @@ void Physics::R3Step()
     }
     if (r3Phase_ == R3Phase::PreHoneycomb) {
         R3PreHoneycombStep();
+        return;
+    }
+    if (r3Phase_ == R3Phase::Fortify) {
+        R3FortifyStep();
         return;
     }
     if (r3Phase_ == R3Phase::PostRepair) {

@@ -229,11 +229,13 @@ private:
 
     // ---- Reidemeister 3 state machine ----
     // Phase A: tighten the triangle to a honeycomb (one edge bead per side).
+    // Phase A2: hex-spoke springs from the face bead to the 6-cycle.
     // Phase B: cut-and-slide terminals toward those three beads (meetings).
     // Phase C: after FinalizeR3, fill gaps then strip sharp bends.
     enum class R3Phase
     {
         PreHoneycomb,
+        Fortify,
         Slide,
         PostRepair
     };
@@ -266,6 +268,11 @@ private:
     void AdvanceR3Slider(R3Slider& s);
     void R3PreHoneycombStep();
     bool BeginR3Slide();
+    bool BindR3HoneycombSpokes();
+    bool R3HoneycombSpokesActive() const;
+    bool R3HoneycombSpokesSettled() const;
+    void R3FortifyStep();
+    void BeginFortifyOrSlide();
     int EdgeInteriorCount(int edge) const;
     float EdgeChainLength(int edge) const;
     int InsertBeadAtFarthestGap(int edge);
@@ -298,6 +305,10 @@ private:
     int r3SettleEdge_ = -1;
     float r3SettleLength_ = 0.0f;
     int r3SettleFrames_ = 0;
+    // Face-bead index in neck_->faceBeads and the 6 boundary beads
+    // (V0, e0, V1, e1, V2, e2). -1 when the hex truss is off.
+    int r3HoneycombFaceFi_ = -1;
+    int r3HoneycombSpokes_[6] = {-1, -1, -1, -1, -1, -1};
 
     bool debugTiming_ = false;
     PhysicsDebugTimings debugTimings_;

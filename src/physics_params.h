@@ -14,12 +14,12 @@ struct PhysicsParams
     float springStiffness = 500.0f;
     float collisionStiffness = 250.0f;
     float dragStiffness = 250.0f;
-    float damping = 85.0f;
+    float damping = 80.0f;
     float dt = 1.0f / 60.0f;
     int substeps = 20;
     float maxSpeed = 20.0f;
 
-    double tensionThreshold = 3.323;
+    double tensionThreshold = 4.0;
     int relaxStepsMax = 80;
     int autoStepsPerFrame = 30;
     // Beads with interior angle <= pi/3 + bendAngleEpsilon are removed first.
@@ -35,6 +35,9 @@ struct PhysicsParams
 
     // Center-to-center distance (in bead diameters) before inserting a bead while dragging.
     float gapSize = 1.2f;
+
+    // Stiffness of the six R3 honeycomb-fortify springs (face bead to 6-cycle).
+    float r3FortifyStiffness = 500.0f;
 
     // Face-bead mass during Reidemeister 3 (edge beads stay mass 1).
     float r3FaceBeadMass = 10.0f;

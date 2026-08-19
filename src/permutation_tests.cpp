@@ -417,8 +417,8 @@ bool RunPermutationTests()
             if (triFace >= 0) {
                 Check(phys.StartR3Move(triFace), "R3 end-to-end: move starts");
                 int frames = 0;
-                // Pre-honeycomb settle rounds + slide need a larger frame budget.
-                while (phys.R3Active() && !phys.R3Complete() && frames < 12000) {
+                // Pre-honeycomb + fortify settle + slide need a larger frame budget.
+                while (phys.R3Active() && !phys.R3Complete() && frames < 15000) {
                     phys.R3Step();
                     ++frames;
                 }
