@@ -33,3 +33,9 @@ struct InscribedCircle
 // precision picks a scale from the bounding box.
 InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices,
                                        double precision = 0.0);
+
+// True when chords (p0,p2) and (p1,p3) interleave around `center` — the
+// geometric pairing of opposite slots at a 4-valent vertex bead. False when
+// a neighbor coincides with the center or the two pairs occupy disjoint arcs.
+bool OppositeSlotsLinked(const Vec2d& center, const Vec2d& p0, const Vec2d& p1,
+                         const Vec2d& p2, const Vec2d& p3);

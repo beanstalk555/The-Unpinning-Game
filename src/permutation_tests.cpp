@@ -361,6 +361,26 @@ bool RunPermutationTests()
         Check(necklace.NeighborToward(necklace.crossingBead[0], loop.sigma.Cycles()[0][0]) >= 0,
               "NeighborToward finds the edge bead for a half-edge");
 
+        {
+            PhysicsParams params;
+            Necklace neckT = necklace;
+            Physics phys(loop, neckT, params, exterior);
+            phys.RefreshTangle();
+            Check(!phys.Tangled(), "example 1 grid necklace is not tangled");
+            const int vb = neckT.crossingBead[0];
+            Bead& vertex = neckT.beads[static_cast<size_t>(vb)];
+            const int n0 = vertex.neighborOfHalfEdge[0];
+            const int n1 = vertex.neighborOfHalfEdge[1];
+            Check(n0 >= 0 && n1 >= 0, "example 1 first vertex has opposite-slot neighbors");
+            if (n0 >= 0 && n1 >= 0) {
+                const BeadPos tmp = neckT.beads[static_cast<size_t>(n0)].pos;
+                neckT.beads[static_cast<size_t>(n0)].pos = neckT.beads[static_cast<size_t>(n1)].pos;
+                neckT.beads[static_cast<size_t>(n1)].pos = tmp;
+                phys.RefreshTangle();
+                Check(phys.Tangled(), "swapping two adjacent vertex-neighbor positions is a tangle");
+            }
+        }
+
         double minArea = 1e9;
         double maxArea = 0.0;
         int countAreaOne = 0;
@@ -405,6 +425,15 @@ bool RunPermutationTests()
             Necklace neck2 = necklace;
             PhysicsParams params;
             Physics phys(loop, neck2, params, exterior);
+            phys.Step();
+            int expectedHoneycomb = 0;
+            for (const FaceBead& fb : neck2.faceBeads) {
+                if (fb.phiCycle.size() <= 3 && fb.boundaryBeads.size() == 6) {
+                    ++expectedHoneycomb;
+                }
+            }
+            Check(phys.HoneycombFortifyCount() == expectedHoneycomb,
+                  "honeycomb spokes match 6-bead 1-/2-/3-gons");
             int triFace = -1;
             R3FaceInfo probe;
             for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {
@@ -768,6 +797,39 @@ bool RunPermutationTests()
         }};
         const DrawnMultiloop drawn = BuildMultiloopFromCurves(curves);
         Check(drawn.isUnknot, "crossing-free loop is detected as the unknot");
+    }
+
+    // ---- Tangle helpers: opposite-slot linking and open segment crossings ----
+    {
+        const Vec2d o{0.0, 0.0};
+        const Vec2d e{1.0, 0.0};
+        const Vec2d n{0.0, 1.0};
+        const Vec2d w{-1.0, 0.0};
+        const Vec2d s{0.0, -1.0};
+        Check(OppositeSlotsLinked(o, e, n, w, s),
+              "tangle: CCW NESW opposite slots are linked");
+        Check(OppositeSlotsLinked(o, n, w, s, e),
+              "tangle: rotated opposite slots are linked");
+        // Angular order 0,1,3,2: pairs {1,3} sit as consecutive samples.
+        Check(!OppositeSlotsLinked(o, e, n, s, w),
+              "tangle: swapped last pair is unlinked");
+        const Vec2d e2{1.0, 0.1};
+        const Vec2d w2{-1.0, 0.1};
+        Check(!OppositeSlotsLinked(o, e, w, e2, w2),
+              "tangle: two pairs on opposite sides are unlinked");
+        Check(!OppositeSlotsLinked(o, o, n, w, s),
+              "tangle: neighbor at the center is unlinked");
+
+        Vector2 a{0.0f, 0.0f};
+        Vector2 b{1.0f, 1.0f};
+        Vector2 c{0.0f, 1.0f};
+        Vector2 d{1.0f, 0.0f};
+        Check(SegmentsProperlyCross(a, b, c, d, nullptr),
+              "tangle: crossing diagonals of a square properly intersect");
+        Check(!SegmentsProperlyCross(a, c, a, d, nullptr),
+              "tangle: segments sharing an endpoint do not properly intersect");
+        Check(!SegmentsProperlyCross(a, c, d, b, nullptr),
+              "tangle: disjoint square sides do not intersect");
     }
 
     if (checksFailed == 0) {

@@ -1,5 +1,6 @@
 #include "physics.h"
 
+#include "drawing.h"
 #include "geometry.h"
 
 #include <algorithm>
@@ -301,6 +302,7 @@ void Physics::RebuildFaceBodiesFromCache()
         faceBodies_.push_back(exteriorBoundary_);
     }
     PruneRemovedFromFaceBodies();
+    RebuildHoneycombSpokes();
 }
 
 void Physics::PruneRemovedFromFaceBodies()
@@ -313,6 +315,56 @@ void Physics::PruneRemovedFromFaceBodies()
                                    }),
                     group.end());
     }
+}
+
+void Physics::RebuildHoneycombSpokes()
+{
+    honeycombFaceFi_.clear();
+    honeycombSpokes_.clear();
+    const int n = BeadCount();
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        const FaceBead& fb = neck_->faceBeads[fi];
+        if (fb.phiCycle.size() > 3 || fb.boundaryBeads.size() != 6) {
+            continue;
+        }
+        int spokes[6];
+        bool ok = true;
+        for (int i = 0; i < 6; ++i) {
+            const int b = fb.boundaryBeads[static_cast<size_t>(i)];
+            if (b < 0 || b >= n || neck_->beads[static_cast<size_t>(b)].removed) {
+                ok = false;
+                break;
+            }
+            spokes[i] = b;
+        }
+        if (!ok) {
+            continue;
+        }
+        honeycombFaceFi_.push_back(static_cast<int>(fi));
+        honeycombSpokes_.insert(honeycombSpokes_.end(), spokes, spokes + 6);
+    }
+}
+
+bool Physics::FaceHasHoneycombSpokes(int fi) const
+{
+    for (const int x : honeycombFaceFi_) {
+        if (x == fi) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int Physics::HoneycombSlotForFace(int face) const
+{
+    for (size_t h = 0; h < honeycombFaceFi_.size(); ++h) {
+        const int fi = honeycombFaceFi_[h];
+        if (fi >= 0 && fi < static_cast<int>(neck_->faceBeads.size()) &&
+            neck_->faceBeads[static_cast<size_t>(fi)].face == face) {
+            return static_cast<int>(h);
+        }
+    }
+    return -1;
 }
 
 void Physics::AppendIncidentFaces(int edge, std::unordered_set<int>& out) const
@@ -362,6 +414,7 @@ void Physics::RefreshFaceBody(int face)
                 faceBodies_.push_back(std::move(bodies));
             }
         }
+        RebuildHoneycombSpokes();
         return;
     }
     for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
@@ -384,6 +437,7 @@ void Physics::RefreshFaceBody(int face)
         else {
             faceBodies_.push_back(std::move(bodies));
         }
+        RebuildHoneycombSpokes();
         return;
     }
 }
@@ -538,42 +592,19 @@ void Physics::Integrate(float dt)
         }
     }
 
-    // Hexagonal honeycomb spokes: face bead to the 6-cycle (rest = diameter).
-    if (r3Active_ && R3HoneycombSpokesActive()) {
-        const int faceBody = beads + r3HoneycombFaceFi_;
-        if (faceBody >= 0 && faceBody < total) {
-            for (int i = 0; i < 6; ++i) {
-                const int spoke = r3HoneycombSpokes_[i];
-                if (spoke < 0 || spoke >= beads ||
-                    neck_->beads[static_cast<size_t>(spoke)].removed) {
-                    continue;
-                }
-                const Vector2 pa = PosOf(faceBody);
-                const Vector2 pb = PosOf(spoke);
-                const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
-                const float len = std::sqrt(d.x * d.x + d.y * d.y);
-                if (len < 1e-6f) {
-                    continue;
-                }
-                const float mag = params_->r3FortifyStiffness * (len - diameter_);
-                const Vector2 dir = {d.x / len, d.y / len};
-                force[faceBody].x += mag * dir.x;
-                force[faceBody].y += mag * dir.y;
-                force[spoke].x -= mag * dir.x;
-                force[spoke].y -= mag * dir.y;
-            }
-        }
-    }
-
     std::vector<char> skipFaceCollision(static_cast<size_t>(faces), 0);
+    std::vector<char> faceArrived(static_cast<size_t>(faces), 0);
+    std::vector<char> haveIncenter(static_cast<size_t>(faces), 0);
+    std::vector<Vector2> incenterTarget(static_cast<size_t>(faces), Vector2{0.0f, 0.0f});
     std::unordered_set<int> r3Faces;
     if (r3Active_) {
         CollectR3InvolvedFaces(&r3Faces);
     }
-    // Face beads being pulled to their incenter skip collisions until they
-    // arrive; crossing the polygon boundary is not enough (they still overlap
-    // edge beads and would chatter).
+    // Crossing the polygon is not arrival: the disk still overlaps edge
+    // beads and chatters. Collisions and honeycomb spokes stay off until the
+    // center is inside and within 0.2*diameter of the inscribed-circle center.
     const float incenterArriveTol = 0.2f * diameter_;
+    const double incenterPrecision = std::max(1e-4, 0.05 * static_cast<double>(radius_));
     for (int fi = 0; fi < faces; ++fi) {
         const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
         std::vector<Vec2d> poly;
@@ -582,47 +613,98 @@ void Physics::Integrate(float dt)
             !havePoly || PointInPolygon(Vec2d{static_cast<double>(fb.pos.x),
                                               static_cast<double>(fb.pos.y)},
                                         poly);
-        bool pullToIncenter = !inside;
+        if (!havePoly) {
+            faceArrived[static_cast<size_t>(fi)] = inside ? 1 : 0;
+            if (!inside) {
+                skipFaceCollision[static_cast<size_t>(fi)] = 1;
+            }
+            continue;
+        }
+        const InscribedCircle circle = LargestInscribedCircle(poly, incenterPrecision);
+        Vec2d target = circle.center;
+        if (!circle.found) {
+            target = {0.0, 0.0};
+            for (const Vec2d& v : poly) {
+                target.x += v.x;
+                target.y += v.y;
+            }
+            target.x /= static_cast<double>(poly.size());
+            target.y /= static_cast<double>(poly.size());
+        }
+        const Vector2 p = PosOf(beads + fi);
+        const float dx = static_cast<float>(target.x) - p.x;
+        const float dy = static_cast<float>(target.y) - p.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        incenterTarget[static_cast<size_t>(fi)] = {static_cast<float>(target.x),
+                                                   static_cast<float>(target.y)};
+        haveIncenter[static_cast<size_t>(fi)] = 1;
+        // No inscribed circle: centroid can sit on a pinch, so never "arrive".
+        const bool arrived = inside && circle.found && len <= incenterArriveTol;
+        faceArrived[static_cast<size_t>(fi)] = arrived ? 1 : 0;
+        if (!arrived) {
+            skipFaceCollision[static_cast<size_t>(fi)] = 1;
+        }
+    }
+
+    // Hexagonal honeycomb spokes: each 6-cycle 1-/2-/3-gon face bead is
+    // pulled to its boundary beads (rest = diameter). Off until arrival so
+    // the truss cannot pin a bead against the necklace on the way in.
+    for (size_t h = 0; h < honeycombFaceFi_.size(); ++h) {
+        if (honeycombSpokes_.size() < (h + 1) * 6) {
+            break;
+        }
+        const int fi = honeycombFaceFi_[h];
+        const int faceBody = beads + fi;
+        if (fi < 0 || fi >= faces || faceBody < 0 || faceBody >= total ||
+            !faceArrived[static_cast<size_t>(fi)]) {
+            continue;
+        }
+        for (int i = 0; i < 6; ++i) {
+            const int spoke = honeycombSpokes_[h * 6 + static_cast<size_t>(i)];
+            if (spoke < 0 || spoke >= beads ||
+                neck_->beads[static_cast<size_t>(spoke)].removed) {
+                continue;
+            }
+            const Vector2 pa = PosOf(faceBody);
+            const Vector2 pb = PosOf(spoke);
+            const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
+            const float len = std::sqrt(d.x * d.x + d.y * d.y);
+            if (len < 1e-6f) {
+                continue;
+            }
+            const float mag = params_->honeycombFortifyStiffness * (len - diameter_);
+            const Vector2 dir = {d.x / len, d.y / len};
+            force[faceBody].x += mag * dir.x;
+            force[faceBody].y += mag * dir.y;
+            force[spoke].x -= mag * dir.x;
+            force[spoke].y -= mag * dir.y;
+        }
+    }
+
+    for (int fi = 0; fi < faces; ++fi) {
+        const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
+        const bool arrived = faceArrived[static_cast<size_t>(fi)] != 0;
+        bool pullToIncenter = !arrived;
         if (r3Active_ && r3Faces.count(fb.face) != 0) {
             pullToIncenter = true;
         }
-        if (R3HoneycombSpokesActive() && fb.face == r3Info_.face) {
+        if (FaceHasHoneycombSpokes(fi) && arrived) {
             pullToIncenter = false;
         }
-        if (!pullToIncenter) {
+        if (!pullToIncenter || !haveIncenter[static_cast<size_t>(fi)]) {
             continue;
         }
-        if (havePoly) {
-            const double precision = std::max(1e-4, 0.05 * static_cast<double>(radius_));
-            const InscribedCircle circle = LargestInscribedCircle(poly, precision);
-            Vec2d target = circle.center;
-            if (!circle.found) {
-                target = {0.0, 0.0};
-                for (const Vec2d& v : poly) {
-                    target.x += v.x;
-                    target.y += v.y;
-                }
-                target.x /= static_cast<double>(poly.size());
-                target.y /= static_cast<double>(poly.size());
-            }
-            const int body = beads + fi;
-            const Vector2 p = PosOf(body);
-            const Vector2 d = {static_cast<float>(target.x) - p.x,
-                               static_cast<float>(target.y) - p.y};
-            const float len = std::sqrt(d.x * d.x + d.y * d.y);
-            if (len > 1e-6f) {
-                // Rest length 0: force = stiffness * displacement toward the incenter.
-                const float mag = params_->springStiffness * len;
-                const Vector2 dir = {d.x / len, d.y / len};
-                force[body].x += mag * dir.x;
-                force[body].y += mag * dir.y;
-            }
-            if (len > incenterArriveTol) {
-                skipFaceCollision[static_cast<size_t>(fi)] = 1;
-            }
-        }
-        else if (!inside) {
-            skipFaceCollision[static_cast<size_t>(fi)] = 1;
+        const int body = beads + fi;
+        const Vector2 p = PosOf(body);
+        const Vector2 target = incenterTarget[static_cast<size_t>(fi)];
+        const Vector2 d = {target.x - p.x, target.y - p.y};
+        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+        if (len > 1e-6f) {
+            // Rest length 0: force = stiffness * displacement toward the incenter.
+            const float mag = params_->springStiffness * len;
+            const Vector2 dir = {d.x / len, d.y / len};
+            force[body].x += mag * dir.x;
+            force[body].y += mag * dir.y;
         }
     }
 
@@ -694,6 +776,117 @@ void Physics::ComputeTension()
         stretch_ /= beadCount;
         compression_ /= beadCount;
     }
+}
+
+void Physics::RefreshTangle()
+{
+    tangled_ = DetectTangle();
+}
+
+bool Physics::DetectTangle() const
+{
+    const int n = BeadCount();
+    for (int i = 0; i < n; ++i) {
+        const Bead& b = neck_->beads[static_cast<size_t>(i)];
+        if (!b.isVertex || b.removed) {
+            continue;
+        }
+        Vec2d p[4];
+        bool ok = true;
+        for (int k = 0; k < 4; ++k) {
+            const int nb = b.neighborOfHalfEdge[k];
+            if (nb < 0 || nb >= n || neck_->beads[static_cast<size_t>(nb)].removed) {
+                ok = false;
+                break;
+            }
+            const BeadPos& q = neck_->beads[static_cast<size_t>(nb)].pos;
+            p[k] = Vec2d{static_cast<double>(q.x), static_cast<double>(q.y)};
+        }
+        if (!ok) {
+            continue;
+        }
+        const Vec2d c{static_cast<double>(b.pos.x), static_cast<double>(b.pos.y)};
+        if (!OppositeSlotsLinked(c, p[0], p[1], p[2], p[3])) {
+            return true;
+        }
+    }
+
+    struct Seg
+    {
+        int a = -1;
+        int b = -1;
+        Vector2 pa = {0.0f, 0.0f};
+        Vector2 pb = {0.0f, 0.0f};
+    };
+    std::vector<Seg> segs;
+    segs.reserve(static_cast<size_t>(n) * 2);
+    for (int i = 0; i < n; ++i) {
+        const Bead& b = neck_->beads[static_cast<size_t>(i)];
+        if (b.removed) {
+            continue;
+        }
+        int neigh[4];
+        int nc = 0;
+        if (b.isVertex) {
+            for (int k = 0; k < 4; ++k) {
+                neigh[nc++] = b.neighborOfHalfEdge[k];
+            }
+        }
+        else {
+            neigh[nc++] = b.neighbors[0];
+            neigh[nc++] = b.neighbors[1];
+        }
+        for (int k = 0; k < nc; ++k) {
+            const int j = neigh[k];
+            if (j <= i || j >= n || neck_->beads[static_cast<size_t>(j)].removed) {
+                continue;
+            }
+            Seg s;
+            s.a = i;
+            s.b = j;
+            s.pa = Vector2{b.pos.x, b.pos.y};
+            const BeadPos& q = neck_->beads[static_cast<size_t>(j)].pos;
+            s.pb = Vector2{q.x, q.y};
+            segs.push_back(s);
+        }
+    }
+
+    float maxLen = diameter_;
+    for (const Seg& s : segs) {
+        const float dx = s.pb.x - s.pa.x;
+        const float dy = s.pb.y - s.pa.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (len > maxLen) {
+            maxLen = len;
+        }
+    }
+
+    SpatialDiskGrid grid;
+    grid.SetCellSize(std::max(3.0f * diameter_, maxLen));
+    grid.Reserve(segs.size());
+    for (int i = 0; i < static_cast<int>(segs.size()); ++i) {
+        const float mx = 0.5f * (segs[static_cast<size_t>(i)].pa.x +
+                                 segs[static_cast<size_t>(i)].pb.x);
+        const float my = 0.5f * (segs[static_cast<size_t>(i)].pa.y +
+                                 segs[static_cast<size_t>(i)].pb.y);
+        grid.Insert(i, mx, my);
+    }
+
+    bool hit = false;
+    grid.ForEachCandidatePair([&](int ia, int ib) {
+        if (hit) {
+            return;
+        }
+        const Seg& a = segs[static_cast<size_t>(ia)];
+        const Seg& b = segs[static_cast<size_t>(ib)];
+        if (a.a == b.a || a.a == b.b || a.b == b.a || a.b == b.b) {
+            return;
+        }
+        if (SegmentsProperlyCross(a.pa, a.pb, b.pa, b.pb, nullptr)) {
+            hit = true;
+        }
+    });
+    return hit;
 }
 
 double Physics::EdgeTension(int edge) const
@@ -1696,10 +1889,6 @@ void Physics::ClearR3State()
     r3SettleFrames_ = 0;
     r3Phase_ = R3Phase::PreHoneycomb;
     r3PreSub_ = R3PreSub::NeedRemove;
-    r3HoneycombFaceFi_ = -1;
-    for (int i = 0; i < 6; ++i) {
-        r3HoneycombSpokes_[i] = -1;
-    }
 }
 
 std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
@@ -1992,6 +2181,29 @@ bool Physics::RemoveSharpBendIfAllowed()
     return false;
 }
 
+bool Physics::RemoveMonogonExcessIfAllowed()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    for (int k = 1; k <= loop_->numEdges; ++k) {
+        if (!EdgeIsLoop(k) || HoneycombFloorBlocksRemoval(k)) {
+            continue;
+        }
+        const int removed = RemoveBeadFromEdge(k, false, nullptr, nullptr, true);
+        if (removed < 0) {
+            continue;
+        }
+        RefreshEdgeChain(k);
+        RebuildSpringsFromChains();
+        RefreshFaceBodiesForEdge(k);
+        RebuildFaceBodiesFromCache();
+        structureDirty_ = false;
+        return true;
+    }
+    return false;
+}
+
 void Physics::StartR3PostRepair()
 {
     if (autoActive_ || r3Active_) {
@@ -2029,7 +2241,7 @@ void Physics::R3PostRepairStep()
 
     int n = 0;
     bool any = false;
-    while (n++ < 8 && RemoveSharpBendIfAllowed()) {
+    while (n++ < 8 && (RemoveSharpBendIfAllowed() || RemoveMonogonExcessIfAllowed())) {
         any = true;
     }
     Step();
@@ -2212,8 +2424,27 @@ void Physics::R3PreHoneycombStep()
             return;
         }
 
-        const int pick =
-            candidates[static_cast<size_t>(std::rand() % static_cast<int>(candidates.size()))];
+        const auto phiIndex = [this](int edge) {
+            for (int i = 0; i < 3; ++i) {
+                if (std::abs(r3Info_.h[i]) == edge) {
+                    return i;
+                }
+            }
+            return 3;
+        };
+        int pick = candidates[0];
+        float bestLen = EdgeChainLength(pick);
+        int bestPhi = phiIndex(pick);
+        for (size_t c = 1; c < candidates.size(); ++c) {
+            const int k = candidates[c];
+            const float len = EdgeChainLength(k);
+            const int phi = phiIndex(k);
+            if (len > bestLen || (len == bestLen && phi < bestPhi)) {
+                pick = k;
+                bestLen = len;
+                bestPhi = phi;
+            }
+        }
         r3SettleLength_ = EdgeChainLength(pick);
         if (RemoveFarthestFromFaceCenter(pick, r3Info_.face) < 0) {
             CancelR3Move();
@@ -2240,14 +2471,21 @@ void Physics::R3PreHoneycombStep()
         for (const int k : r3ExteriorEdges_) {
             RefreshEdgeChain(k);
         }
-        int bestEdge = r3ExteriorEdges_[0];
+        int bestEdge = -1;
         double bestTension = -1.0;
         for (const int k : r3ExteriorEdges_) {
+            if (NeighborHoneycombBlocksRemoval(k)) {
+                continue;
+            }
             const double t = EdgeTension(k);
             if (t > bestTension) {
                 bestTension = t;
                 bestEdge = k;
             }
+        }
+        if (bestEdge < 0) {
+            r3PreSub_ = R3PreSub::NeedRemove;
+            return;
         }
         const float length = EdgeChainLength(bestEdge);
         const double threshold =
@@ -2274,61 +2512,47 @@ void Physics::R3PreHoneycombStep()
 
 bool Physics::R3HoneycombSpokesActive() const
 {
-    if (r3HoneycombFaceFi_ < 0 ||
-        r3HoneycombFaceFi_ >= static_cast<int>(neck_->faceBeads.size())) {
-        return false;
-    }
-    for (int i = 0; i < 6; ++i) {
-        if (r3HoneycombSpokes_[i] < 0) {
-            return false;
-        }
-    }
-    return true;
+    return HoneycombSlotForFace(r3Info_.face) >= 0;
 }
 
 bool Physics::BindR3HoneycombSpokes()
 {
-    r3HoneycombFaceFi_ = -1;
-    for (int i = 0; i < 6; ++i) {
-        r3HoneycombSpokes_[i] = -1;
+    if (structureDirty_) {
+        RebuildStructures();
     }
-    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
-        if (neck_->faceBeads[fi].face == r3Info_.face) {
-            r3HoneycombFaceFi_ = static_cast<int>(fi);
-            break;
-        }
-    }
-    if (r3HoneycombFaceFi_ < 0) {
-        return false;
-    }
-    for (int i = 0; i < 3; ++i) {
-        const int j = (i + 1) % 3;
-        const std::vector<int> chain =
-            WalkSideChain(r3Info_.vertexBead[i], r3Info_.h[i]);
-        if (static_cast<int>(chain.size()) != 3 ||
-            chain[0] != r3Info_.vertexBead[i] ||
-            chain.back() != r3Info_.vertexBead[j] ||
-            neck_->beads[static_cast<size_t>(chain[1])].isVertex ||
-            neck_->beads[static_cast<size_t>(chain[1])].removed) {
-            r3HoneycombFaceFi_ = -1;
-            return false;
-        }
-        r3HoneycombSpokes_[2 * i] = r3Info_.vertexBead[i];
-        r3HoneycombSpokes_[2 * i + 1] = chain[1];
-    }
-    return true;
+    return HoneycombSlotForFace(r3Info_.face) >= 0;
 }
 
 bool Physics::R3HoneycombSpokesSettled() const
 {
-    if (!R3HoneycombSpokesActive()) {
+    const int slot = HoneycombSlotForFace(r3Info_.face);
+    if (slot < 0 || honeycombSpokes_.size() < static_cast<size_t>(slot + 1) * 6) {
         return false;
     }
-    const int faceBody = BeadCount() + r3HoneycombFaceFi_;
+    const int fi = honeycombFaceFi_[static_cast<size_t>(slot)];
+    const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
+    if (!FaceBeadInsideFace(fb)) {
+        return false;
+    }
+    std::vector<Vec2d> poly;
+    if (FaceBoundaryPolygon(fb.face, &poly)) {
+        const double precision = std::max(1e-4, 0.05 * static_cast<double>(radius_));
+        const InscribedCircle circle = LargestInscribedCircle(poly, precision);
+        if (!circle.found) {
+            return false;
+        }
+        const float dx = static_cast<float>(circle.center.x) - fb.pos.x;
+        const float dy = static_cast<float>(circle.center.y) - fb.pos.y;
+        if (std::sqrt(dx * dx + dy * dy) > 0.2f * diameter_) {
+            return false;
+        }
+    }
+    const int faceBody = BeadCount() + fi;
     const float band = 0.35f * diameter_;
     const Vector2 pa = PosOf(faceBody);
     for (int i = 0; i < 6; ++i) {
-        const int spoke = r3HoneycombSpokes_[i];
+        const int spoke =
+            honeycombSpokes_[static_cast<size_t>(slot) * 6 + static_cast<size_t>(i)];
         if (spoke < 0 || spoke >= BeadCount() ||
             neck_->beads[static_cast<size_t>(spoke)].removed) {
             return false;

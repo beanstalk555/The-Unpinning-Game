@@ -1868,6 +1868,11 @@ namespace
                               app.physics->TotalTension(), app.physics->StretchTension(),
                               app.physics->CompressionTension());
                 DrawTextS(buf, undoX + undoW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
+                if (app.physics->Tangled()) {
+                    const float tangleX =
+                        undoX + undoW + 16.0f + TextWidth(buf, 18.0f) + 12.0f;
+                    DrawTextS("tangle", tangleX, row3 + 6.0f, 18.0f, kErrorRed);
+                }
             }
             else {
                 DrawTextS("Drag beads to perturb; auto-tighten removes slack.",
@@ -1956,6 +1961,7 @@ namespace
                             faceBeadClick ? app.pickClickBody - beadCount : -1;
                         app.pickClickBody = -1;
                         app.physics->EndDrag();
+                        app.physics->RefreshTangle();
                         if (clickedFaceBead >= 0) {
                             const FaceBead& fb = app.necklace->faceBeads[static_cast<size_t>(
                                 clickedFaceBead)];
@@ -1999,6 +2005,9 @@ namespace
                 const bool r3Now = app.physics && app.physics->R3Active();
                 if ((app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now)) {
                     BeginViewFit(app, canvas);
+                    if (app.physics) {
+                        app.physics->RefreshTangle();
+                    }
                 }
                 app.wasAutoTightening = autoNow;
                 app.wasR3Active = r3Now;

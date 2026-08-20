@@ -36,8 +36,9 @@ struct PhysicsParams
     // Center-to-center distance (in bead diameters) before inserting a bead while dragging.
     float gapSize = 1.2f;
 
-    // Stiffness of the six R3 honeycomb-fortify springs (face bead to 6-cycle).
-    float r3FortifyStiffness = 500.0f;
+    // Stiffness of diameter-rest springs from a honeycomb face bead to its
+    // 6-cycle (trigon / bigon / monogon with 6 boundary beads).
+    float honeycombFortifyStiffness = 500.0f;
 
     // Face-bead mass during Reidemeister 3 (edge beads stay mass 1).
     float r3FaceBeadMass = 10.0f;

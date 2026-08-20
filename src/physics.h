@@ -57,6 +57,12 @@ public:
     double CompressionTension() const { return compression_; }
     double TotalTension() const { return stretch_ + compression_; }
 
+    // Cached tangle flag: unintended non-crossing at a vertex, or two
+    // necklace edges whose center segments properly intersect. Refresh after
+    // drag / auto-tighten / R3; false on a freshly built planar layout.
+    bool Tangled() const { return tangled_; }
+    void RefreshTangle();
+
     // Bend at an edge bead B sitting between neighbors A and C: the dot
     // product of the unit vectors BA and BC. +1 is folded back on itself,
     // 0 is a right angle, and -1 is perfectly straight.
@@ -95,6 +101,9 @@ public:
     // After FinalizeR3 + a new Physics on the rewritten loop: fill oversized
     // gaps, then strip sharp bends without breaking honeycomb faces.
     void StartR3PostRepair();
+
+    // Number of 1-/2-/3-gons currently held by a 6-spoke honeycomb truss.
+    int HoneycombFortifyCount() const { return static_cast<int>(honeycombFaceFi_.size()); }
 
     // Excess area (polyArea minus boundary pie slices) for a face bead.
     double FaceExcessArea(const FaceBead& fb) const;
@@ -204,6 +213,7 @@ private:
 
     double stretch_ = 0.0;
     double compression_ = 0.0;
+    bool tangled_ = false;
 
     int dragBody_ = -1;
     Vector2 dragTarget_ = {0.0f, 0.0f};
@@ -284,10 +294,15 @@ private:
     bool HoneycombFloorBlocksRemoval(int edge);
     bool InsertLargestGapIfNeeded();
     bool RemoveSharpBendIfAllowed();
+    bool RemoveMonogonExcessIfAllowed();
+    void RebuildHoneycombSpokes();
+    bool FaceHasHoneycombSpokes(int fi) const;
+    int HoneycombSlotForFace(int face) const;
     void R3PostRepairStep();
     void ClearR3State();
     bool FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const;
     void CollectR3InvolvedFaces(std::unordered_set<int>* out) const;
+    bool DetectTangle() const;
 
     bool r3Active_ = false;
     bool r3Complete_ = false;
@@ -305,10 +320,9 @@ private:
     int r3SettleEdge_ = -1;
     float r3SettleLength_ = 0.0f;
     int r3SettleFrames_ = 0;
-    // Face-bead index in neck_->faceBeads and the 6 boundary beads
-    // (V0, e0, V1, e1, V2, e2). -1 when the hex truss is off.
-    int r3HoneycombFaceFi_ = -1;
-    int r3HoneycombSpokes_[6] = {-1, -1, -1, -1, -1, -1};
+    // Packed 6-spoke truss for every 1-/2-/3-gon with 6 boundary beads.
+    std::vector<int> honeycombFaceFi_;
+    std::vector<int> honeycombSpokes_;
 
     bool debugTiming_ = false;
     PhysicsDebugTimings debugTimings_;

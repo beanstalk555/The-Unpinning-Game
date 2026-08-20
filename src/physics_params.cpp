@@ -17,6 +17,6 @@ void PhysicsParams::ResetDefaults()
     ratioCombineMode = RatioCombineMode::Max;
     collisionBoundsScale = 3.0f;
     gapSize = 1.2f;
-    r3FortifyStiffness = 500.0f;
+    honeycombFortifyStiffness = 500.0f;
     r3FaceBeadMass = 10.0f;
 }

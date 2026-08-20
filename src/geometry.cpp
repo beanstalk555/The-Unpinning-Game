@@ -185,3 +185,39 @@ InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices, doubl
     }
     return result;
 }
+
+bool OppositeSlotsLinked(const Vec2d& center, const Vec2d& p0, const Vec2d& p1,
+                         const Vec2d& p2, const Vec2d& p3)
+{
+    const Vec2d pts[4] = {p0, p1, p2, p3};
+    struct Sample
+    {
+        double angle;
+        int slot;
+    };
+    Sample samples[4];
+    for (int i = 0; i < 4; ++i) {
+        const double dx = pts[i].x - center.x;
+        const double dy = pts[i].y - center.y;
+        if (dx * dx + dy * dy < 1e-18) {
+            return false;
+        }
+        samples[i].angle = std::atan2(dy, dx);
+        samples[i].slot = i;
+    }
+    std::sort(samples, samples + 4, [](const Sample& a, const Sample& b) {
+        if (a.angle != b.angle) {
+            return a.angle < b.angle;
+        }
+        return a.slot < b.slot;
+    });
+    for (int i = 0; i < 4; ++i) {
+        const int a = samples[i].slot;
+        const int b = samples[(i + 1) % 4].slot;
+        // Pairs are {0,2} (even) and {1,3} (odd). Adjacent same-pair → unlinked.
+        if ((a & 1) == (b & 1)) {
+            return false;
+        }
+    }
+    return true;
+}
