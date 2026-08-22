@@ -592,6 +592,46 @@ void Physics::Integrate(float dt)
         }
     }
 
+    // Inverse-square repulsion between interiors on distinct R3 triangle sides
+    // so the face stays open while a side is stripped.
+    if (r3Active_ && r3Phase_ == R3Phase::PreHoneycomb &&
+        params_->r3CycleRepelStiffness > 0.0f) {
+        RebuildR3CycleSideBeads();
+        const float cutoff = 4.0f * diameter_;
+        const float rFloor = 0.25f * diameter_;
+        const float k = params_->r3CycleRepelStiffness;
+        for (int i = 0; i < 3; ++i) {
+            for (int j = i + 1; j < 3; ++j) {
+                for (const int a : r3CycleSideBeads_[i]) {
+                    if (a < 0 || a >= beads || neck_->beads[static_cast<size_t>(a)].removed) {
+                        continue;
+                    }
+                    for (const int b : r3CycleSideBeads_[j]) {
+                        if (b < 0 || b >= beads ||
+                            neck_->beads[static_cast<size_t>(b)].removed) {
+                            continue;
+                        }
+                        const Vector2 pa = PosOf(a);
+                        const Vector2 pb = PosOf(b);
+                        const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
+                        const float len = std::sqrt(d.x * d.x + d.y * d.y);
+                        if (len < 1e-6f || len >= cutoff) {
+                            continue;
+                        }
+                        const float r = std::max(len, rFloor);
+                        const float scale = diameter_ / r;
+                        const float mag = k * scale * scale;
+                        const Vector2 dir = {d.x / len, d.y / len};
+                        force[a].x -= mag * dir.x;
+                        force[a].y -= mag * dir.y;
+                        force[b].x += mag * dir.x;
+                        force[b].y += mag * dir.y;
+                    }
+                }
+            }
+        }
+    }
+
     std::vector<char> skipFaceCollision(static_cast<size_t>(faces), 0);
     std::vector<char> faceArrived(static_cast<size_t>(faces), 0);
     std::vector<char> haveIncenter(static_cast<size_t>(faces), 0);
@@ -1882,6 +1922,9 @@ void Physics::ClearR3State()
     }
     r3CutEdges_.clear();
     r3ExteriorEdges_.clear();
+    for (std::vector<int>& side : r3CycleSideBeads_) {
+        side.clear();
+    }
     r3Meeting_[0] = r3Meeting_[1] = r3Meeting_[2] = -1;
     r3StallFrames_ = 0;
     r3SettleEdge_ = -1;
@@ -1919,6 +1962,28 @@ std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
         chain.push_back(cur);
     }
     return chain;
+}
+
+void Physics::RebuildR3CycleSideBeads()
+{
+    for (int i = 0; i < 3; ++i) {
+        r3CycleSideBeads_[i].clear();
+        const int vb = r3Info_.vertexBead[i];
+        if (vb < 0) {
+            continue;
+        }
+        const std::vector<int> chain = WalkSideChain(vb, r3Info_.h[i]);
+        if (chain.size() < 3) {
+            continue;
+        }
+        for (size_t t = 1; t + 1 < chain.size(); ++t) {
+            const int b = chain[t];
+            if (b < 0 || b >= BeadCount() || neck_->beads[static_cast<size_t>(b)].removed) {
+                continue;
+            }
+            r3CycleSideBeads_[i].push_back(b);
+        }
+    }
 }
 
 int Physics::EdgeInteriorCount(int edge) const
@@ -2099,6 +2164,19 @@ bool Physics::NeighborHoneycombBlocksRemoval(int edge)
 
 bool Physics::HoneycombFloorBlocksRemoval(int edge)
 {
+    // Only the infinite face itself being a monogon (phi length 1) must keep
+    // its long exterior arc. A finite monogon that merely touches the outer
+    // face should still be allowed to tighten after R3.
+    if (EdgeIsLoop(edge) && loop_ != nullptr && exteriorFace_ >= 0 &&
+        exteriorFace_ < static_cast<int>(loop_->faces.size()) &&
+        loop_->faces[static_cast<size_t>(exteriorFace_)].size() == 1) {
+        const auto itPos = faceOfHalfEdge_.find(edge);
+        const auto itNeg = faceOfHalfEdge_.find(-edge);
+        if ((itPos != faceOfHalfEdge_.end() && itPos->second == exteriorFace_) ||
+            (itNeg != faceOfHalfEdge_.end() && itNeg->second == exteriorFace_)) {
+            return true;
+        }
+    }
     std::unordered_set<int> faces;
     AppendIncidentFaces(edge, faces);
     for (const int f : faces) {

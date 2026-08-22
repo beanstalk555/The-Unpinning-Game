@@ -20,7 +20,7 @@ namespace
     constexpr float kPad = 14.0f;
     constexpr float kResetH = 30.0f;
     constexpr float kExtraRowH = 34.0f;
-    constexpr int kSliderCount = 16;
+    constexpr int kSliderCount = 17;
 
     float Clampf(float v, float lo, float hi)
     {
@@ -63,6 +63,7 @@ namespace
         {"Gap size (x bead)", 1.0f, 1.5f, false, false},
         {"Honeycomb fortify stiffness", 1.0f, 2000.0f, false, false},
         {"R3 face bead mass", 1.0f, 1000.0f, false, false},
+        {"R3 cycle repel stiffness", 0.0f, 20.0f, false, false},
     };
 
     const char* kRatioModeLabels[] = {"minimum", "maximum", "average"};
@@ -86,6 +87,7 @@ namespace
         case 13: return params.gapSize;
         case 14: return params.honeycombFortifyStiffness;
         case 15: return params.r3FaceBeadMass;
+        case 16: return params.r3CycleRepelStiffness;
         default: return 0.0f;
         }
     }
@@ -109,6 +111,7 @@ namespace
         case 13: params.gapSize = value; break;
         case 14: params.honeycombFortifyStiffness = value; break;
         case 15: params.r3FaceBeadMass = value; break;
+        case 16: params.r3CycleRepelStiffness = value; break;
         default: break;
         }
     }

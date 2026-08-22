@@ -43,5 +43,10 @@ struct PhysicsParams
     // Face-bead mass during Reidemeister 3 (edge beads stay mass 1).
     float r3FaceBeadMass = 10.0f;
 
+    // Inverse-square repulsion between interior beads on distinct sides of
+    // the R3 triangle during pre-honeycomb (0 disables). At one bead diameter
+    // the force equals this value.
+    float r3CycleRepelStiffness = 10.8f;
+
     void ResetDefaults();
 };

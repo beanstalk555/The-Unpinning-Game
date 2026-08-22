@@ -19,4 +19,5 @@ void PhysicsParams::ResetDefaults()
     gapSize = 1.2f;
     honeycombFortifyStiffness = 500.0f;
     r3FaceBeadMass = 10.0f;
+    r3CycleRepelStiffness = 10.8f;
 }

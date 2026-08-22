@@ -300,6 +300,7 @@ private:
     int HoneycombSlotForFace(int face) const;
     void R3PostRepairStep();
     void ClearR3State();
+    void RebuildR3CycleSideBeads();
     bool FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const;
     void CollectR3InvolvedFaces(std::unordered_set<int>* out) const;
     bool DetectTangle() const;
@@ -317,6 +318,8 @@ private:
     std::vector<std::pair<int, int>> r3CutEdges_; // (edge label, terminal bead)
     // Unique exterior edge labels |a[i]|, |b[i]| (sa–sf, possibly fewer than 6).
     std::vector<int> r3ExteriorEdges_;
+    // Interior beads on each triangle side h[i] (vertices omitted).
+    std::vector<int> r3CycleSideBeads_[3];
     int r3SettleEdge_ = -1;
     float r3SettleLength_ = 0.0f;
     int r3SettleFrames_ = 0;
