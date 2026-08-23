@@ -19,7 +19,7 @@ struct PhysicsParams
     int substeps = 20;
     float maxSpeed = 20.0f;
 
-    double tensionThreshold = 4.0;
+    double tensionThreshold = 1.7;
     int relaxStepsMax = 80;
     int autoStepsPerFrame = 30;
     // Beads with interior angle <= pi/3 + bendAngleEpsilon are removed first.
@@ -35,6 +35,10 @@ struct PhysicsParams
 
     // Center-to-center distance (in bead diameters) before inserting a bead while dragging.
     float gapSize = 1.2f;
+
+    // Same units, used only by R3 post-repair gap fill. Lower values insert
+    // more freely after a move.
+    float r3PostRepairGapSize = 1.15f;
 
     // Stiffness of diameter-rest springs from a honeycomb face bead to its
     // 6-cycle (trigon / bigon / monogon with 6 boundary beads).

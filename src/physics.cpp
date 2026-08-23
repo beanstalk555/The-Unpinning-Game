@@ -2197,7 +2197,7 @@ bool Physics::InsertLargestGapIfNeeded()
     if (structureDirty_) {
         RebuildStructures();
     }
-    const float gapThreshold = params_->gapSize * diameter_;
+    const float gapThreshold = params_->r3PostRepairGapSize * diameter_;
     float bestDist = gapThreshold;
     int bestEdge = -1;
     int bestA = -1;
@@ -2552,9 +2552,6 @@ void Physics::R3PreHoneycombStep()
         int bestEdge = -1;
         double bestTension = -1.0;
         for (const int k : r3ExteriorEdges_) {
-            if (NeighborHoneycombBlocksRemoval(k)) {
-                continue;
-            }
             const double t = EdgeTension(k);
             if (t > bestTension) {
                 bestTension = t;

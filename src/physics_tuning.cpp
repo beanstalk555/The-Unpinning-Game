@@ -20,7 +20,7 @@ namespace
     constexpr float kPad = 14.0f;
     constexpr float kResetH = 30.0f;
     constexpr float kExtraRowH = 34.0f;
-    constexpr int kSliderCount = 17;
+    constexpr int kSliderCount = 18;
 
     float Clampf(float v, float lo, float hi)
     {
@@ -64,6 +64,7 @@ namespace
         {"Honeycomb fortify stiffness", 1.0f, 2000.0f, false, false},
         {"R3 face bead mass", 1.0f, 1000.0f, false, false},
         {"R3 cycle repel stiffness", 0.0f, 20.0f, false, false},
+        {"R3 post-repair gap size", 1.0f, 1.2f, false, false},
     };
 
     const char* kRatioModeLabels[] = {"minimum", "maximum", "average"};
@@ -88,6 +89,7 @@ namespace
         case 14: return params.honeycombFortifyStiffness;
         case 15: return params.r3FaceBeadMass;
         case 16: return params.r3CycleRepelStiffness;
+        case 17: return params.r3PostRepairGapSize;
         default: return 0.0f;
         }
     }
@@ -112,6 +114,7 @@ namespace
         case 14: params.honeycombFortifyStiffness = value; break;
         case 15: params.r3FaceBeadMass = value; break;
         case 16: params.r3CycleRepelStiffness = value; break;
+        case 17: params.r3PostRepairGapSize = value; break;
         default: break;
         }
     }
@@ -128,16 +131,22 @@ namespace
         else if (kSpecs[index].isDouble || index == 3) {
             std::snprintf(buf, sizeof(buf), "%.3f", value);
         }
+        else if (index == 17) {
+            std::snprintf(buf, sizeof(buf), "%.2f", value);
+        }
         else {
             std::snprintf(buf, sizeof(buf), "%.1f", value);
         }
         return buf;
     }
 
-    float PanelHeight(const PhysicsTuningUI& ui)
+    constexpr float kScrollW = 12.0f;
+    constexpr float kMinPanelH = kTitleH + 160.0f;
+
+    float ContentHeight(const PhysicsTuningUI& ui)
     {
-        float h = kTitleH + kPad + kSliderCount * kRowH + 2.0f * (20.0f + kExtraRowH) +
-                  kResetH + kPad;
+        float h = kPad + kSliderCount * kRowH + 2.0f * (20.0f + kExtraRowH) + kResetH +
+                  kPad;
         if (ui.ratioDropdownOpen) {
             h += 3.0f * 26.0f;
         }
@@ -146,7 +155,7 @@ namespace
 
     Rectangle PanelRect(const PhysicsTuningUI& ui)
     {
-        return Rectangle{ui.pos.x, ui.pos.y, kPanelW, PanelHeight(ui)};
+        return Rectangle{ui.pos.x, ui.pos.y, kPanelW, ui.viewH};
     }
 }
 
@@ -167,19 +176,27 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
         ui.posInitialized = true;
     }
 
-    const Rectangle panel = PanelRect(ui);
-    const float panelH = panel.height;
+    const float contentH = ContentHeight(ui);
+    const float maxH = std::max(kMinPanelH, static_cast<float>(screenHeight) - 16.0f);
+    ui.viewH = Clampf(kTitleH + contentH, kMinPanelH, maxH);
 
     ui.pos.x = Clampf(ui.pos.x, 0.0f, static_cast<float>(screenWidth) - kPanelW);
-    ui.pos.y = Clampf(ui.pos.y, 0.0f, static_cast<float>(screenHeight) - panelH);
+    ui.pos.y = Clampf(ui.pos.y, 0.0f, std::max(0.0f, static_cast<float>(screenHeight) - ui.viewH));
 
+    const Rectangle panel = PanelRect(ui);
     const Rectangle titleBar = {panel.x, panel.y, panel.width, kTitleH};
     const Rectangle closeBtn = {panel.x + panel.width - 28.0f, panel.y + 6.0f, 22.0f, 20.0f};
+    const Rectangle body = {panel.x, panel.y + kTitleH, panel.width, panel.height - kTitleH};
+    const bool needsScroll = contentH > body.height + 0.5f;
+    const float scrollMax = needsScroll ? contentH - body.height : 0.0f;
+    const Rectangle scrollTrack = {panel.x + panel.width - kPad - kScrollW, body.y + 6.0f,
+                                   kScrollW, std::max(12.0f, body.height - 12.0f)};
 
     if (click) {
         if (CheckCollisionPointRec(mouse, closeBtn)) {
             ui.open = false;
             ui.draggingWindow = false;
+            ui.draggingScroll = false;
             ui.activeSlider = -1;
             ui.ratioDropdownOpen = false;
             return;
@@ -188,15 +205,32 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
             ui.draggingWindow = true;
             ui.dragOffset = {mouse.x - ui.pos.x, mouse.y - ui.pos.y};
         }
+        else if (needsScroll && CheckCollisionPointRec(mouse, scrollTrack)) {
+            ui.draggingScroll = true;
+            ui.activeSlider = -1;
+        }
     }
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
         ui.draggingWindow = false;
+        ui.draggingScroll = false;
         ui.activeSlider = -1;
     }
     if (ui.draggingWindow) {
         ui.pos.x = mouse.x - ui.dragOffset.x;
         ui.pos.y = mouse.y - ui.dragOffset.y;
     }
+
+    if (needsScroll && CheckCollisionPointRec(mouse, panel) && !ui.draggingWindow &&
+        ui.activeSlider < 0) {
+        ui.scrollY -= GetMouseWheelMove() * 40.0f;
+    }
+    if (ui.draggingScroll && scrollMax > 0.0f) {
+        const float thumbH = std::max(24.0f, scrollTrack.height * (body.height / contentH));
+        const float travel = std::max(1.0f, scrollTrack.height - thumbH);
+        const float t = Clampf((mouse.y - scrollTrack.y - thumbH * 0.5f) / travel, 0.0f, 1.0f);
+        ui.scrollY = t * scrollMax;
+    }
+    ui.scrollY = Clampf(ui.scrollY, 0.0f, scrollMax);
 
     DrawRectangle(static_cast<int>(panel.x) + 4, static_cast<int>(panel.y) + 4,
                   static_cast<int>(panel.width), static_cast<int>(panel.height),
@@ -209,11 +243,17 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
     DrawRectangleRec(closeBtn, Color{255, 255, 255, 40});
     DrawTextS(font, "X", closeBtn.x + 6.0f, closeBtn.y + 1.0f, 16.0f, WHITE);
 
-    float y = panel.y + kTitleH + kPad;
     const float trackX = panel.x + kPad;
-    const float trackW = panel.width - 2.0f * kPad;
+    const float trackW = panel.width - 2.0f * kPad - (needsScroll ? (kScrollW + 6.0f) : 0.0f);
     const float labelSize = 15.0f;
     const float valueSize = 14.0f;
+    const bool inBody = CheckCollisionPointRec(mouse, body) &&
+                        !(needsScroll && CheckCollisionPointRec(mouse, scrollTrack));
+
+    BeginScissorMode(static_cast<int>(body.x), static_cast<int>(body.y),
+                     static_cast<int>(body.width), static_cast<int>(body.height));
+
+    float y = body.y + kPad - ui.scrollY;
 
     for (int i = 0; i < kSliderCount; ++i) {
         const SliderSpec& spec = kSpecs[i];
@@ -226,7 +266,7 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
 
         const float trackY = y + 22.0f;
         const Rectangle trackHit = {trackX - 4.0f, trackY - 10.0f, trackW + 8.0f, 24.0f};
-        if (click && CheckCollisionPointRec(mouse, trackHit)) {
+        if (click && inBody && CheckCollisionPointRec(mouse, trackHit)) {
             ui.activeSlider = i;
             ui.ratioDropdownOpen = false;
         }
@@ -247,14 +287,13 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
         y += kRowH;
     }
 
-    // Ratio combine mode dropdown.
     {
         DrawTextS(font, "Edge excess combine:", trackX, y + 4.0f, labelSize, kTextDark);
         y += 20.0f;
         const int mode = static_cast<int>(params.ratioCombineMode);
         const std::string shown = kRatioModeLabels[mode];
         const Rectangle box = {trackX, y, trackW, 26.0f};
-        if (click && CheckCollisionPointRec(mouse, box)) {
+        if (click && inBody && CheckCollisionPointRec(mouse, box)) {
             ui.ratioDropdownOpen = !ui.ratioDropdownOpen;
         }
         DrawRectangleRec(box, WHITE);
@@ -273,7 +312,7 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
             DrawRectangleLinesEx(list, 2.0f, kAccent);
             for (int m = 0; m < 3; ++m) {
                 const Rectangle item = {list.x, list.y + m * itemH, list.width, itemH};
-                const bool hover = CheckCollisionPointRec(mouse, item);
+                const bool hover = inBody && CheckCollisionPointRec(mouse, item);
                 if (m == mode) {
                     DrawRectangleRec(item, kAccent);
                 }
@@ -291,7 +330,7 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
     }
 
     const Rectangle resetBtn = {trackX, y, trackW, kResetH};
-    const bool resetHover = CheckCollisionPointRec(mouse, resetBtn);
+    const bool resetHover = inBody && CheckCollisionPointRec(mouse, resetBtn);
     DrawRectangleRounded(resetBtn, 0.3f, 6,
                          resetHover ? ColorBrightness(kAccent, -0.12f) : kAccent);
     const std::string resetLabel = "Reset defaults";
@@ -300,6 +339,17 @@ void FramePhysicsTuning(PhysicsTuningUI& ui, PhysicsParams& params, Font font,
               resetBtn.y + 6.0f, 16.0f, WHITE);
     if (click && resetHover) {
         params.ResetDefaults();
+    }
+
+    EndScissorMode();
+
+    if (needsScroll) {
+        DrawRectangleRec(scrollTrack, Color{220, 222, 228, 255});
+        const float thumbH = std::max(24.0f, scrollTrack.height * (body.height / contentH));
+        const float travel = std::max(1.0f, scrollTrack.height - thumbH);
+        const float thumbY = scrollTrack.y + travel * (scrollMax > 0.0f ? ui.scrollY / scrollMax : 0.0f);
+        const Rectangle thumb = {scrollTrack.x + 1.0f, thumbY, scrollTrack.width - 2.0f, thumbH};
+        DrawRectangleRounded(thumb, 0.4f, 4, ui.draggingScroll ? kAccent : Color{140, 144, 156, 255});
     }
 
     if (click && !CheckCollisionPointRec(mouse, panel)) {

@@ -15,6 +15,9 @@ struct PhysicsTuningUI
     bool draggingWindow = false;
     Vector2 dragOffset = {0.0f, 0.0f};
     bool ratioDropdownOpen = false;
+    float scrollY = 0.0f;
+    float viewH = 400.0f;
+    bool draggingScroll = false;
 };
 
 // True when the panel is open and the mouse is over it (blocks canvas input).
