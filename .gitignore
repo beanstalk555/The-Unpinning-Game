@@ -1,3 +1,10 @@
 *.exe
 *.dsym
+*.o
+*.txt
+*.jpg
+.vscode/
+debug/
+src/.cursor
+main.code-workspace
 main
