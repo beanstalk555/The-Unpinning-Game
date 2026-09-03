@@ -11,6 +11,7 @@
 #include <memory>
 #include <random>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "beads.h"
@@ -734,7 +735,26 @@ namespace
                 physics->StopAutoTighten();
             }
             debugFaceBeadIndex = -1;
+
+            std::unordered_map<int, int> labelByFace;
+            if (necklace) {
+                for (const FaceBead& fb : necklace->faceBeads) {
+                    if (fb.face >= 0 && fb.label > 0) {
+                        labelByFace[fb.face] = fb.label;
+                    }
+                }
+            }
+
             SelectFace(selectedFace);
+
+            if (necklace && !labelByFace.empty()) {
+                for (FaceBead& fb : necklace->faceBeads) {
+                    const auto it = labelByFace.find(fb.face);
+                    if (it != labelByFace.end()) {
+                        fb.label = it->second;
+                    }
+                }
+            }
         }
 
         // Swap in the rewritten multiloop once the R3 slide has converged.
