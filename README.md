@@ -1,6 +1,6 @@
 # The Unpinning Game
 
-A raylib prototype for drawing and tightening multiloop diagrams.
+A raylib prototype for the unpinning game. Features random multiloop generation and drawing, a custom physics engine for tightening and settling, the ability to add and remove pins, and dynamic performance of Reidemeister moves. The combinatorics of the multiloop are stored and manipulated using the permutation representation.
 
 ## Windows
 
