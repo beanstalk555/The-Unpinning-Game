@@ -5,6 +5,5 @@
 *.jpg
 .vscode/
 debug/
-src/.cursor
 main.code-workspace
 main
