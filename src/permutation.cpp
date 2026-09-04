@@ -41,7 +41,7 @@ Permutation Permutation::FromCycles(const std::vector<std::vector<int>>& cycles)
     return p;
 }
 
-Permutation Permutation::FromString(const std::string& input)
+std::vector<std::vector<int>> ParseCycleNotation(const std::string& input)
 {
     // Optionally strip one pair of square brackets wrapping the whole
     // expression (SnapPy PD code style): recognized when the bracket matching
@@ -99,9 +99,7 @@ Permutation Permutation::FromString(const std::string& input)
             if (c != expectedCloser) {
                 throw std::invalid_argument("Mismatched brackets in cycle notation");
             }
-            if (!current.empty()) {
-                cycles.push_back(current);
-            }
+            cycles.push_back(current);
             expectedCloser = '\0';
             ++i;
         }
@@ -122,11 +120,21 @@ Permutation Permutation::FromString(const std::string& input)
         throw std::invalid_argument("Missing closing bracket in cycle notation");
     }
 
+    return cycles;
+}
+
+Permutation Permutation::FromString(const std::string& input)
+{
+    std::vector<std::vector<int>> cycles = ParseCycleNotation(input);
+
     // PD-style duplicate labels: each edge label should occur once as +k and
     // once as -k; when a label occurs twice with the same sign (e.g. SnapPy PD
     // codes, which are all positive), the second occurrence is negated.
     std::set<int> used;
     for (std::vector<int>& cycle : cycles) {
+        if (cycle.empty()) {
+            continue;
+        }
         for (int& value : cycle) {
             if (used.count(value) != 0 && used.count(-value) == 0) {
                 value = -value;

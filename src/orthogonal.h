@@ -33,6 +33,19 @@ struct GridLayout
 // orthogonal.py. Throws std::runtime_error on failure.
 GridLayout ComputeGridLayout(const Multiloop& loop, int exteriorFace);
 
+// Per-component Tamassia drawings packed left to right. Circles occupy a
+// unit square; crossing components are relabeled and laid out separately.
+struct PackedGridLayout
+{
+    GridLayout layout;
+    std::vector<GridPoint> componentOrigin;
+    std::vector<int> componentWidth;
+    std::vector<int> componentHeight;
+};
+
+PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
+                                         const std::vector<MultiloopComponent>& components);
+
 // Vertex list of a face polygon traced along layout.edgePaths in phi order.
 std::vector<Vec2d> GridFacePolygon(const Multiloop& loop, const GridLayout& layout, int face);
 

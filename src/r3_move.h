@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 
 #include "beads.h"
 #include "multiloop.h"
@@ -52,3 +53,7 @@ bool ComputeR3Sigma(const Multiloop& loop, const R3FaceInfo& info, Permutation* 
 std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
                                       const R3FaceInfo& info, const int meeting[3],
                                       int oldExteriorFace, int* newExteriorFace);
+std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
+                                      const R3FaceInfo& info, const int meeting[3],
+                                      const std::vector<int>& oldExteriorFaces,
+                                      std::vector<int>* newExteriorFaces);

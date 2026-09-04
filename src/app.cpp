@@ -12,6 +12,7 @@
 #include <random>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "beads.h"
@@ -526,6 +527,7 @@ namespace
 
         std::string error;
         std::unique_ptr<Multiloop> loop;
+        std::vector<MultiloopComponent> components;
         std::vector<std::string> faceLabels;
         int selectedFace = -1;
         std::unique_ptr<GridLayout> layout;
@@ -568,6 +570,7 @@ namespace
         struct R3UndoSnapshot
         {
             std::unique_ptr<Multiloop> loop;
+            std::vector<MultiloopComponent> components;
             GridLayout layout;
             Necklace necklace;
             int selectedFace = -1;
@@ -587,6 +590,7 @@ namespace
             }
             R3UndoSnapshot snap;
             snap.loop.reset(new Multiloop(*loop));
+            snap.components = components;
             snap.layout = *layout;
             snap.necklace = *necklace;
             snap.selectedFace = selectedFace;
@@ -615,6 +619,7 @@ namespace
             }
             physics.reset();
             loop = std::move(snap.loop);
+            components = std::move(snap.components);
             layout.reset(new GridLayout(std::move(snap.layout)));
             necklace.reset(new Necklace(std::move(snap.necklace)));
             selectedFace = snap.selectedFace;
@@ -627,10 +632,7 @@ namespace
             for (const std::vector<int>& face : loop->faces) {
                 faceLabels.push_back(CycleToString(face));
             }
-            sigmaBox.text = loop->sigma.ToString();
-            sigmaBox.caret = 0;
-            sigmaBox.anchor = 0;
-            sigmaBox.scrollX = 0.0f;
+            SyncSigmaText();
             viewLayoutKey = layout.get();
             viewReady = true;
             viewCell = snap.viewCell;
@@ -639,7 +641,7 @@ namespace
             viewGridHeight = snap.viewGridHeight;
             viewAnimating = false;
             try {
-                physics.reset(new Physics(*loop, *necklace, physicsParams, selectedFace));
+                physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
             }
             catch (const std::exception& e) {
                 physics.reset();
@@ -667,6 +669,139 @@ namespace
             countBox.text = "20";
         }
 
+        std::unordered_set<int> PhysicsExteriors() const
+        {
+            std::unordered_set<int> faces;
+            for (const MultiloopComponent& component : components) {
+                if (component.kind == MultiloopPart::Crossings && component.exteriorFace >= 0) {
+                    faces.insert(component.exteriorFace);
+                }
+            }
+            if (faces.empty() && selectedFace >= 0) {
+                faces.insert(selectedFace);
+            }
+            return faces;
+        }
+
+        int CircleCount() const
+        {
+            int n = 0;
+            for (const MultiloopComponent& component : components) {
+                if (component.kind == MultiloopPart::Circle) {
+                    ++n;
+                }
+            }
+            return n;
+        }
+
+        int CrossingComponentCount() const
+        {
+            int n = 0;
+            for (const MultiloopComponent& component : components) {
+                if (component.kind == MultiloopPart::Crossings) {
+                    ++n;
+                }
+            }
+            return n;
+        }
+
+        int DrawnStrandCount() const
+        {
+            if (!loop) {
+                return CircleCount();
+            }
+            int extra = 0;
+            for (const MultiloopComponent& component : components) {
+                if (component.kind == MultiloopPart::Circle && component.strand < 0) {
+                    ++extra;
+                }
+            }
+            return loop->numStrands + extra;
+        }
+
+        void SyncSigmaText()
+        {
+            sigmaBox.text = FormatSigmaNotation(loop ? loop->sigma : Permutation(), components);
+            sigmaBox.caret = 0;
+            sigmaBox.anchor = 0;
+            sigmaBox.scrollX = 0.0f;
+        }
+
+        void RebuildPacked()
+        {
+            layout.reset();
+            necklace.reset();
+            physics.reset();
+            error.clear();
+            try {
+                const Permutation empty;
+                const Multiloop dummy(empty);
+                const Multiloop& src = loop ? *loop : dummy;
+                PackedGridLayout packed = ComputePackedGridLayout(src, components);
+                necklace.reset(new Necklace(BuildPackedNecklace(src, packed, components)));
+                layout.reset(new GridLayout(std::move(packed.layout)));
+                if (!loop) {
+                    physics.reset(new Physics(*necklace, physicsParams));
+                }
+                else {
+                    physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
+                }
+            }
+            catch (const std::exception& e) {
+                layout.reset();
+                necklace.reset();
+                physics.reset();
+                error = e.what();
+            }
+        }
+
+        void EnterCircles(std::vector<MultiloopComponent> comps)
+        {
+            loop.reset();
+            components = std::move(comps);
+            unknotMode = true;
+            dropdownOpen = false;
+            dropdownScroll = 0.0f;
+            debugFaceBeadIndex = -1;
+            ClearR3Undo();
+            error.clear();
+            const int n = static_cast<int>(components.size());
+            if (n <= 1) {
+                layout.reset(new GridLayout(UnknotGridLayout()));
+                necklace.reset(new Necklace(BuildUnknotNecklace()));
+                faceLabels = {"()", "()'"};
+                selectedFace = 0;
+                sigmaBox.text = "()";
+                sigmaBox.caret = 0;
+                sigmaBox.anchor = 0;
+                sigmaBox.scrollX = 0.0f;
+                try {
+                    physics.reset(new Physics(*necklace, physicsParams));
+                }
+                catch (const std::exception& e) {
+                    physics.reset();
+                    error = e.what();
+                }
+                return;
+            }
+            faceLabels.clear();
+            selectedFace = -1;
+            SyncSigmaText();
+            RebuildPacked();
+        }
+
+        void EnterCirclesMode(int n)
+        {
+            std::vector<MultiloopComponent> comps;
+            comps.reserve(static_cast<size_t>(std::max(0, n)));
+            for (int i = 0; i < n; ++i) {
+                MultiloopComponent circle;
+                circle.kind = MultiloopPart::Circle;
+                comps.push_back(std::move(circle));
+            }
+            EnterCircles(std::move(comps));
+        }
+
         void SubmitSigma()
         {
             error.clear();
@@ -679,27 +814,57 @@ namespace
             dropdownOpen = false;
             dropdownScroll = 0.0f;
             unknotMode = false;
+            components.clear();
             ClearR3Undo();
             try {
-                const Permutation sigma = Permutation::FromString(sigmaBox.text);
-                const std::string message = ValidateMultiloopSigma(sigma);
+                const SigmaNotation parsed = ParseSigmaNotation(sigmaBox.text);
+                if (parsed.components.empty()) {
+                    error = "sigma is empty";
+                    return;
+                }
+                int circles = 0;
+                int crossings = 0;
+                for (const MultiloopComponent& component : parsed.components) {
+                    if (component.kind == MultiloopPart::Circle) {
+                        ++circles;
+                    }
+                    else {
+                        ++crossings;
+                    }
+                }
+                if (crossings == 0) {
+                    EnterCirclesMode(circles);
+                    return;
+                }
+                const std::string message = ValidateMultiloopSigma(parsed.sigma);
                 if (!message.empty()) {
                     error = message;
                     return;
                 }
-                loop.reset(new Multiloop(sigma));
+                loop.reset(new Multiloop(parsed.sigma));
+                components = parsed.components;
+                ApplyDefaultExteriors(*loop, components);
                 for (const std::vector<int>& face : loop->faces) {
                     faceLabels.push_back(CycleToString(face));
                 }
-                // Normalize the textbox to canonical cycle notation.
-                sigmaBox.text = loop->sigma.ToString();
-                sigmaBox.caret = 0;
-                sigmaBox.anchor = 0;
-                sigmaBox.scrollX = 0.0f;
+                SyncSigmaText();
+                selectedFace = -1;
+                for (const MultiloopComponent& component : components) {
+                    if (component.kind == MultiloopPart::Crossings && component.exteriorFace >= 0) {
+                        selectedFace = component.exteriorFace;
+                        break;
+                    }
+                }
+                RebuildPacked();
             }
             catch (const std::exception& e) {
                 error = e.what();
             }
+        }
+
+        void EnterUnknotMode()
+        {
+            EnterCirclesMode(1);
         }
 
         void SelectFace(int index)
@@ -708,27 +873,42 @@ namespace
             if (unknotMode) {
                 return; // both faces give the same picture
             }
-            layout.reset();
-            necklace.reset();
-            physics.reset();
-            error.clear();
+            if (!loop || index < 0 || index >= static_cast<int>(loop->faces.size())) {
+                return;
+            }
+            for (MultiloopComponent& component : components) {
+                if (ComponentOwnsFace(component, *loop, index)) {
+                    component.exteriorFace = index;
+                    break;
+                }
+            }
             ClearR3Undo();
-            try {
-                layout.reset(new GridLayout(ComputeGridLayout(*loop, index)));
-                necklace.reset(new Necklace(BuildNecklace(*loop, *layout, index)));
-                physics.reset(new Physics(*loop, *necklace, physicsParams, index));
-            }
-            catch (const std::exception& e) {
-                layout.reset();
-                necklace.reset();
-                physics.reset();
-                error = e.what();
-            }
+            RebuildPacked();
         }
 
         void ResetToGrid()
         {
-            if (unknotMode || selectedFace < 0 || !loop) {
+            if (unknotMode) {
+                if (physics && physics->AutoTightening()) {
+                    physics->StopAutoTighten();
+                }
+                debugFaceBeadIndex = -1;
+                if (CircleCount() <= 1) {
+                    necklace.reset(new Necklace(BuildUnknotNecklace()));
+                    physics.reset();
+                    try {
+                        physics.reset(new Physics(*necklace, physicsParams));
+                    }
+                    catch (const std::exception& e) {
+                        physics.reset();
+                        error = e.what();
+                    }
+                    return;
+                }
+                RebuildPacked();
+                return;
+            }
+            if (!loop) {
                 return;
             }
             if (physics && physics->AutoTightening()) {
@@ -745,7 +925,7 @@ namespace
                 }
             }
 
-            SelectFace(selectedFace);
+            RebuildPacked();
 
             if (necklace && !labelByFace.empty()) {
                 for (FaceBead& fb : necklace->faceBeads) {
@@ -768,9 +948,10 @@ namespace
             R3FaceInfo info;
             int meeting[3] = {-1, -1, -1};
             physics->GetR3Result(&info, meeting);
-            int newExterior = -1;
+            const std::vector<int> oldExteriors = ExteriorFaceIndices(components);
+            std::vector<int> newExteriors;
             std::unique_ptr<Multiloop> newLoop =
-                FinalizeR3(*loop, *necklace, info, meeting, selectedFace, &newExterior);
+                FinalizeR3(*loop, *necklace, info, meeting, oldExteriors, &newExteriors);
             if (!newLoop) {
                 physics->CancelR3Move();
                 return;
@@ -779,17 +960,31 @@ namespace
             physics.reset();
             loop = std::move(newLoop);
             debugFaceBeadIndex = -1;
+            {
+                size_t k = 0;
+                for (MultiloopComponent& component : components) {
+                    if (component.kind != MultiloopPart::Crossings) {
+                        continue;
+                    }
+                    if (k < newExteriors.size()) {
+                        if (component.exteriorFace == selectedFace) {
+                            selectedFace = newExteriors[k];
+                        }
+                        component.exteriorFace = newExteriors[k];
+                    }
+                    ++k;
+                }
+            }
+            if (!newExteriors.empty() && selectedFace < 0) {
+                selectedFace = newExteriors.front();
+            }
             faceLabels.clear();
             for (const std::vector<int>& face : loop->faces) {
                 faceLabels.push_back(CycleToString(face));
             }
-            selectedFace = newExterior;
-            sigmaBox.text = loop->sigma.ToString();
-            sigmaBox.caret = 0;
-            sigmaBox.anchor = 0;
-            sigmaBox.scrollX = 0.0f;
+            SyncSigmaText();
             try {
-                physics.reset(new Physics(*loop, *necklace, physicsParams, selectedFace));
+                physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
                 physics->StartR3PostRepair();
             }
             catch (const std::exception& e) {
@@ -826,20 +1021,8 @@ namespace
             countBox.text = std::to_string(count);
 
             if (count == 1) {
-                // A simple closed curve: no crossings, drawn directly.
-                loop.reset();
-                layout.reset();
-                necklace.reset();
-                physics.reset();
-                unknotMode = true;
-                sigmaBox.text = "()";
-                sigmaBox.caret = 0;
-                sigmaBox.anchor = 0;
-                sigmaBox.scrollX = 0.0f;
-                faceLabels = {"()", "()'"};
-                selectedFace = 0;
-                dropdownOpen = false;
-                dropdownScroll = 0.0f;
+                // A simple closed curve: no crossings.
+                EnterUnknotMode();
                 return;
             }
             if (count == 2) {
@@ -903,6 +1086,7 @@ namespace
             faceLabels.clear();
             selectedFace = -1;
             unknotMode = false;
+            components.clear();
             dropdownOpen = false;
             error.clear();
         }
@@ -914,17 +1098,15 @@ namespace
             drawCurrent.clear();
             drawCrossings.clear();
             drawWarning.clear();
-            // Restore the previous multiloop.
-            if (savedUnknot) {
-                countBox.text = "1";
-                GenerateRandom();
-            }
-            else if (!savedSigmaText.empty() && savedSigmaText != "()") {
+            if (!savedSigmaText.empty()) {
                 sigmaBox.text = savedSigmaText;
                 SubmitSigma();
                 if (loop && savedFace >= 0 && savedFace < static_cast<int>(faceLabels.size())) {
                     SelectFace(savedFace);
                 }
+            }
+            else if (savedUnknot) {
+                EnterUnknotMode();
             }
         }
 
@@ -947,15 +1129,54 @@ namespace
             drawWarning.clear();
             drawCurrent.clear();
             drawCrossings.clear();
-            if (drawn.isUnknot) {
-                countBox.text = "1";
-                GenerateRandom();
-                return;
+            try {
+                if (drawn.isUnknot) {
+                    EnterUnknotMode();
+                    return;
+                }
+                int crossings = 0;
+                for (const MultiloopComponent& component : drawn.components) {
+                    if (component.kind == MultiloopPart::Crossings) {
+                        ++crossings;
+                    }
+                }
+                if (crossings == 0) {
+                    EnterCircles(drawn.components);
+                    return;
+                }
+                loop.reset(new Multiloop(drawn.sigma));
+                ApplyDrawnStrandColors(*loop, drawn);
+                components = drawn.components;
+                ApplyDefaultExteriors(*loop, components);
+                unknotMode = false;
+                ClearR3Undo();
+                faceLabels.clear();
+                for (const std::vector<int>& face : loop->faces) {
+                    faceLabels.push_back(CycleToString(face));
+                }
+                SyncSigmaText();
+                if (drawn.exteriorHalfEdge != 0) {
+                    selectedFace = FaceIndexContainingHalfEdge(*loop, drawn.exteriorHalfEdge);
+                }
+                if (selectedFace < 0) {
+                    for (const MultiloopComponent& component : components) {
+                        if (component.kind == MultiloopPart::Crossings &&
+                            component.exteriorFace >= 0) {
+                            selectedFace = component.exteriorFace;
+                            break;
+                        }
+                    }
+                }
+                RebuildPacked();
+                if (!error.empty()) {
+                    drawing = true;
+                    Warn(error, GetMousePosition());
+                }
             }
-            sigmaBox.text = drawn.sigma.ToString();
-            SubmitSigma();
-            if (loop) {
-                SelectFaceContaining(drawn.exteriorHalfEdge);
+            catch (const std::exception& e) {
+                drawing = true;
+                error = e.what();
+                Warn(error, GetMousePosition());
             }
         }
 
@@ -1361,7 +1582,6 @@ namespace
 
     void DrawLayout(const App& app, const View& view)
     {
-        const Multiloop& loop = *app.loop;
         const Necklace& necklace = *app.necklace;
 
         const float cell = view.cell;
@@ -1409,6 +1629,30 @@ namespace
                       outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
         }
 
+        const auto drawEdgeBeadArc = [&](const Bead& bead, Color color) {
+            if (bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
+                return;
+            }
+            const Vector2 c = toScreen(bead.pos);
+            const Vector2 n0 = toScreen(necklace.beads[bead.neighbors[0]].pos);
+            const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
+            DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
+                              TangentPoint(c, beadRadius, n1), thickness, color);
+        };
+
+        if (app.unknotMode || !app.loop) {
+            for (const Bead& bead : necklace.beads) {
+                if (bead.removed || bead.isVertex) {
+                    continue;
+                }
+                const int strand = (bead.strand >= 0) ? bead.strand : 0;
+                drawEdgeBeadArc(bead, StrandColor(strand));
+            }
+            return;
+        }
+
+        const Multiloop& loop = *app.loop;
+
         // The multiloop itself: orthogonal circle arcs within each bead,
         // drawn strand by strand so higher-index strands always lie on top.
         for (int strand = 0; strand < loop.numStrands; ++strand) {
@@ -1419,9 +1663,14 @@ namespace
                 }
                 const Vector2 c = toScreen(bead.pos);
                 if (bead.isVertex) {
+                    if (bead.sigmaCycle.size() < 4) {
+                        continue;
+                    }
                     // Slots cut by an R3 slide are -1; skip those arcs.
                     for (int j = 0; j < 2; ++j) {
-                        if (loop.strandOfEdge[std::abs(bead.sigmaCycle[j])] != strand) {
+                        const int edge = std::abs(bead.sigmaCycle[static_cast<size_t>(j)]);
+                        if (edge < 1 || edge > loop.numEdges ||
+                            loop.strandOfEdge[static_cast<size_t>(edge)] != strand) {
                             continue;
                         }
                         if (bead.neighborOfHalfEdge[j] < 0 || bead.neighborOfHalfEdge[j + 2] < 0) {
@@ -1441,18 +1690,22 @@ namespace
                             intact[intactCount++] = s;
                         }
                     }
-                    if (intactCount == 2 &&
-                        loop.strandOfEdge[std::abs(bead.sigmaCycle[intact[0]])] == strand) {
-                        const Vector2 n0 =
-                            toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[0]]].pos);
-                        const Vector2 n1 =
-                            toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[1]]].pos);
-                        DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
-                                          TangentPoint(c, beadRadius, n1), thickness, color);
+                    if (intactCount == 2) {
+                        const int edge = std::abs(bead.sigmaCycle[static_cast<size_t>(intact[0])]);
+                        if (edge >= 1 && edge <= loop.numEdges &&
+                            loop.strandOfEdge[static_cast<size_t>(edge)] == strand) {
+                            const Vector2 n0 =
+                                toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[0]]].pos);
+                            const Vector2 n1 =
+                                toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[1]]].pos);
+                            DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
+                                              TangentPoint(c, beadRadius, n1), thickness, color);
+                        }
                     }
                 }
                 else {
-                    if (loop.strandOfEdge[bead.edge] != strand) {
+                    if (bead.edge < 1 || bead.edge > loop.numEdges ||
+                        loop.strandOfEdge[bead.edge] != strand) {
                         continue;
                     }
                     if (bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
@@ -1464,6 +1717,14 @@ namespace
                                       TangentPoint(c, beadRadius, n1), thickness, color);
                 }
             }
+        }
+
+        for (const Bead& bead : necklace.beads) {
+            if (bead.removed || bead.isVertex || bead.edge != 0) {
+                continue;
+            }
+            const int strand = (bead.strand >= 0) ? bead.strand : 0;
+            drawEdgeBeadArc(bead, StrandColor(strand));
         }
 
         if (app.debug) {
@@ -1484,53 +1745,6 @@ namespace
             }
             // Face permutation labels are shown in the lower-left when a face
             // bead is clicked (see Frame).
-        }
-    }
-
-    // The 1-face special case: a simple closed curve drawn as a unit square
-    // of 8 beads with one face bead in the middle.
-    void DrawUnknot(const App& app, Rectangle canvas)
-    {
-        const float margin = 45.0f;
-        const float side = Clampf(std::min(canvas.width, canvas.height) - 2.0f * margin,
-                                  20.0f, 220.0f);
-        const float originX = canvas.x + (canvas.width - side) / 2.0f;
-        const float originY = canvas.y + (canvas.height - side) / 2.0f;
-        const auto toScreen = [&](float gx, float gy) {
-            return Vector2{originX + gx * side, originY + (1.0f - gy) * side};
-        };
-        const float beadRadius = 0.25f * side;
-        const float thickness = Clampf(side * 0.04f, 1.25f, 4.5f);
-
-        const float positions[8][2] = {
-            {0.0f, 0.0f}, {0.5f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.5f},
-            {1.0f, 1.0f}, {0.5f, 1.0f}, {0.0f, 1.0f}, {0.0f, 0.5f},
-        };
-        const float outline = Clampf(beadRadius * 0.10f, 1.0f, 3.0f);
-
-        if (app.showBeads) {
-            for (int i = 0; i < 8; ++i) {
-                const Vector2 c = toScreen(positions[i][0], positions[i][1]);
-                DrawCircleV(c, beadRadius, WHITE);
-                DrawRing(c, beadRadius - outline, beadRadius, 0.0f, 360.0f, 48, kBeadOutline);
-            }
-        }
-        // Face bead in the middle (always shown).
-        {
-            const Vector2 c = toScreen(0.5f, 0.5f);
-            DrawCircleV(c, beadRadius, kFaceBeadFill);
-            DrawRing(c, beadRadius - outline, beadRadius, 0.0f, 360.0f, 48, kFaceBeadEdge);
-            const float fontSize = Clampf(beadRadius * 0.95f, 8.0f, 40.0f);
-            const float textWidth = TextWidth("1", fontSize);
-            DrawTextS("1", c.x - textWidth / 2.0f, c.y - fontSize / 2.0f, fontSize,
-                      Color{15, 35, 12, 255});
-        }
-        for (int i = 0; i < 8; ++i) {
-            const Vector2 c = toScreen(positions[i][0], positions[i][1]);
-            const Vector2 prev = toScreen(positions[(i + 7) % 8][0], positions[(i + 7) % 8][1]);
-            const Vector2 next = toScreen(positions[(i + 1) % 8][0], positions[(i + 1) % 8][1]);
-            DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, prev),
-                              TangentPoint(c, beadRadius, next), thickness, StrandColor(0));
         }
     }
 
@@ -1795,9 +2009,14 @@ namespace
         // right of the dropdown.
         float rx = dropdownBox.x + dropdownBox.width + 16.0f;
         if (app.loop || app.unknotMode) {
-            const int numStrands = app.unknotMode ? 1 : app.loop->numStrands;
+            const int circleCount = app.CircleCount();
+            const int crossingComps = app.CrossingComponentCount();
+            const int numStrands = app.unknotMode ? std::max(1, circleCount)
+                                                  : app.DrawnStrandCount();
             const int numRegions =
-                app.unknotMode ? 1 : static_cast<int>(app.loop->faces.size()) - 1;
+                app.unknotMode
+                    ? std::max(1, circleCount)
+                    : (static_cast<int>(app.loop->faces.size()) - crossingComps + circleCount);
             const std::string strandText = "(" + std::to_string(numStrands) +
                 "-strand multiloop with " + std::to_string(numRegions) + " regions)";
             DrawTextS(strandText, rx, row2 + 6.0f, 18.0f, kTextDim);
@@ -1945,9 +2164,6 @@ namespace
                 "Delete removes the last point. Enter or Done finishes. Escape cancels.";
             const float hw = TextWidth(hint, 18.0f);
             DrawTextS(hint, (screenWidth - hw) / 2.0f, canvas.y + 6.0f, 18.0f, kTextDim);
-        }
-        else if (app.unknotMode) {
-            DrawUnknot(app, canvas);
         }
         else if (app.layout && app.necklace) {
             const View view = MakeView(app, *app.layout, canvas);

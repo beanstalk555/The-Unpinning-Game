@@ -2,6 +2,7 @@
 
 #include "drawing.h"
 #include "geometry.h"
+#include "permutation.h"
 
 #include <algorithm>
 #include <chrono>
@@ -39,10 +40,17 @@ namespace
 
 Physics::Physics(const Multiloop& loop, Necklace& necklace, PhysicsParams& params,
                  int exteriorFace)
+    : Physics(loop, necklace, params, std::unordered_set<int>{exteriorFace})
+{
+}
+
+Physics::Physics(const Multiloop& loop, Necklace& necklace, PhysicsParams& params,
+                 std::unordered_set<int> exteriorFaces)
     : loop_(&loop),
       neck_(&necklace),
       params_(&params),
-      exteriorFace_(exteriorFace),
+      exteriorFace_(exteriorFaces.empty() ? -1 : *exteriorFaces.begin()),
+      exteriorFaces_(std::move(exteriorFaces)),
       radius_(necklace.radius),
       diameter_(2.0f * necklace.radius)
 {
@@ -60,6 +68,29 @@ Physics::Physics(const Multiloop& loop, Necklace& necklace, PhysicsParams& param
             faceOfHalfEdge_[h] = f;
         }
     }
+    structureDirty_ = true;
+}
+
+Physics::Physics(Necklace& necklace, PhysicsParams& params)
+    : loop_(nullptr),
+      neck_(&necklace),
+      params_(&params),
+      exteriorFace_(1),
+      exteriorFaces_{1},
+      radius_(necklace.radius),
+      diameter_(2.0f * necklace.radius),
+      unknot_(true)
+{
+    dummyLoop_.reset(new Multiloop(Permutation()));
+    dummyLoop_->numEdges = 1;
+    dummyLoop_->numStrands = 1;
+    dummyLoop_->strandOfEdge = {-1, 0};
+    dummyLoop_->faces = {{1}, {-1}};
+    loop_ = dummyLoop_.get();
+    faceOfHalfEdge_[1] = 0;
+    faceOfHalfEdge_[-1] = 1;
+    vel_.assign(neck_->beads.size(), Vector2{0.0f, 0.0f});
+    fvel_.assign(neck_->faceBeads.size(), Vector2{0.0f, 0.0f});
     structureDirty_ = true;
 }
 
@@ -110,7 +141,14 @@ std::vector<int> Physics::WalkEdge(int edge) const
     if (itStart == crossingOf_.end()) {
         return chain;
     }
-    const int vStart = neck_->crossingBead[itStart->second];
+    const int crossing = itStart->second;
+    if (crossing < 0 || crossing >= static_cast<int>(neck_->crossingBead.size())) {
+        return chain;
+    }
+    const int vStart = neck_->crossingBead[static_cast<size_t>(crossing)];
+    if (vStart < 0 || vStart >= BeadCount()) {
+        return chain;
+    }
     chain.push_back(vStart);
 
     int prev = vStart;
@@ -256,6 +294,39 @@ void Physics::FlattenSpringsFromEdges()
         const std::vector<std::pair<int, int>>& es = edgeSprings_[static_cast<size_t>(k)];
         springs_.insert(springs_.end(), es.begin(), es.end());
     }
+    if (!unknot_) {
+        AppendCircleSprings();
+    }
+}
+
+void Physics::AppendCircleSprings()
+{
+    for (FaceBead& fb : neck_->faceBeads) {
+        if (fb.face >= 0 || fb.boundaryBeads.size() < 3) {
+            continue;
+        }
+        const std::vector<int>& b = fb.boundaryBeads;
+        for (size_t i = 0; i < b.size(); ++i) {
+            springs_.push_back({b[i], b[(i + 1) % b.size()]});
+        }
+        fb.RefreshBoundaryDots(*neck_);
+        fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
+    }
+}
+
+bool Physics::IsExterior(int face) const
+{
+    return exteriorFaces_.count(face) != 0;
+}
+
+int Physics::ExteriorSlot(int face) const
+{
+    for (size_t i = 0; i < exteriorFaceOrder_.size(); ++i) {
+        if (exteriorFaceOrder_[i] == face) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
 }
 
 void Physics::RebuildFaceGeometry()
@@ -265,13 +336,17 @@ void Physics::RebuildFaceGeometry()
 
     neck_->sharpCornerEdges.clear();
     std::unordered_set<int> sharpSet;
-    exteriorBoundary_.clear();
+    exteriorBoundaries_.clear();
+    exteriorFaceOrder_.clear();
     for (int f = 0; f < static_cast<int>(loop_->faces.size()); ++f) {
-        if (f == exteriorFace_) {
+        if (IsExterior(f)) {
             std::vector<float> exteriorDots;
+            std::vector<int> boundary;
             WalkFaceBoundaryFromPhiCycle(loop_->faces[f], *neck_, crossingOf_,
-                                         exteriorBoundary_, exteriorDots, &sharpSet,
+                                         boundary, exteriorDots, &sharpSet,
                                          sharpDotThreshold_);
+            exteriorFaceOrder_.push_back(f);
+            exteriorBoundaries_.push_back(std::move(boundary));
             continue;
         }
         FaceBead* fb = FaceBeadFor(f);
@@ -282,6 +357,13 @@ void Physics::RebuildFaceGeometry()
                                      fb->boundaryBeads, fb->boundaryDots, &sharpSet,
                                      sharpDotThreshold_);
         fb->cachedExcessArea = fb->ExcessArea(*neck_, radius_);
+    }
+    for (FaceBead& fb : neck_->faceBeads) {
+        if (fb.face >= 0 || fb.boundaryBeads.size() < 3) {
+            continue;
+        }
+        fb.RefreshBoundaryDots(*neck_);
+        fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
     }
     neck_->sharpCornerEdges.assign(sharpSet.begin(), sharpSet.end());
 }
@@ -298,8 +380,10 @@ void Physics::RebuildFaceBodiesFromCache()
         bodies.insert(bodies.end(), fb.boundaryBeads.begin(), fb.boundaryBeads.end());
         faceBodies_.push_back(std::move(bodies));
     }
-    if (!exteriorBoundary_.empty()) {
-        faceBodies_.push_back(exteriorBoundary_);
+    for (const std::vector<int>& boundary : exteriorBoundaries_) {
+        if (!boundary.empty()) {
+            faceBodies_.push_back(boundary);
+        }
     }
     PruneRemovedFromFaceBodies();
     RebuildHoneycombSpokes();
@@ -370,20 +454,25 @@ int Physics::HoneycombSlotForFace(int face) const
 void Physics::AppendIncidentFaces(int edge, std::unordered_set<int>& out) const
 {
     const auto itPos = faceOfHalfEdge_.find(edge);
-    if (itPos != faceOfHalfEdge_.end() && itPos->second != exteriorFace_) {
+    if (itPos != faceOfHalfEdge_.end() && !IsExterior(itPos->second)) {
         out.insert(itPos->second);
     }
     const auto itNeg = faceOfHalfEdge_.find(-edge);
-    if (itNeg != faceOfHalfEdge_.end() && itNeg->second != exteriorFace_) {
+    if (itNeg != faceOfHalfEdge_.end() && !IsExterior(itNeg->second)) {
         out.insert(itNeg->second);
     }
 }
 
 void Physics::WalkFaceBoundaryNoDots(int face)
 {
-    if (face == exteriorFace_) {
+    if (IsExterior(face)) {
+        const int slot = ExteriorSlot(face);
+        if (slot < 0) {
+            return;
+        }
         std::vector<float> unusedDots;
-        WalkFaceBoundaryFromPhiCycle(loop_->faces[face], *neck_, crossingOf_, exteriorBoundary_,
+        WalkFaceBoundaryFromPhiCycle(loop_->faces[face], *neck_, crossingOf_,
+                                     exteriorBoundaries_[static_cast<size_t>(slot)],
                                      unusedDots, nullptr, 0.0f, false);
         return;
     }
@@ -397,18 +486,28 @@ void Physics::WalkFaceBoundaryNoDots(int face)
 
 void Physics::RefreshFaceBody(int face)
 {
-    if (face == exteriorFace_) {
-        std::vector<int> bodies = exteriorBoundary_;
+    if (IsExterior(face)) {
+        const int slot = ExteriorSlot(face);
+        if (slot < 0) {
+            return;
+        }
+        std::vector<int> bodies = exteriorBoundaries_[static_cast<size_t>(slot)];
         bodies.erase(std::remove_if(bodies.begin(), bodies.end(),
                                     [&](int body) {
                                         return body < BeadCount() &&
                                                neck_->beads[static_cast<size_t>(body)].removed;
                                     }),
                      bodies.end());
-        const size_t interiorCount = neck_->faceBeads.size();
+        size_t index = neck_->faceBeads.size();
+        for (int i = 0; i < slot; ++i) {
+            if (i < static_cast<int>(exteriorBoundaries_.size()) &&
+                !exteriorBoundaries_[static_cast<size_t>(i)].empty()) {
+                ++index;
+            }
+        }
         if (!bodies.empty()) {
-            if (faceBodies_.size() > interiorCount) {
-                faceBodies_[interiorCount] = std::move(bodies);
+            if (faceBodies_.size() > index) {
+                faceBodies_[index] = std::move(bodies);
             }
             else {
                 faceBodies_.push_back(std::move(bodies));
@@ -466,6 +565,10 @@ void Physics::RefreshEdgeChain(int edge)
 void Physics::RebuildStructures()
 {
     const ScopedTimer timer(debugTiming_ ? &debugTimings_.rebuildStructuresMs : nullptr);
+    if (unknot_) {
+        RebuildUnknotStructures();
+        return;
+    }
     const int n = loop_->numEdges;
     chains_.assign(n + 1, {});
     for (int k = 1; k <= n; ++k) {
@@ -473,6 +576,70 @@ void Physics::RebuildStructures()
     }
     RebuildSpringsFromChains();
     RebuildFaceGeometry();
+    RebuildFaceBodiesFromCache();
+    structureDirty_ = false;
+}
+
+void Physics::RebuildUnknotStructures()
+{
+    std::vector<char> seen(static_cast<size_t>(std::max(0, BeadCount())), 0);
+    std::vector<std::vector<int>> rings;
+    for (int i = 0; i < BeadCount(); ++i) {
+        const Bead& startBead = neck_->beads[static_cast<size_t>(i)];
+        if (startBead.removed || startBead.isVertex || seen[static_cast<size_t>(i)]) {
+            continue;
+        }
+        std::vector<int> ordered;
+        int prev = -1;
+        int cur = i;
+        const int limit = BeadCount() + 2;
+        for (int guard = 0; guard < limit; ++guard) {
+            if (cur < 0 || cur >= BeadCount() || seen[static_cast<size_t>(cur)]) {
+                break;
+            }
+            seen[static_cast<size_t>(cur)] = 1;
+            ordered.push_back(cur);
+            const Bead& b = neck_->beads[static_cast<size_t>(cur)];
+            int nxt = -1;
+            if (prev < 0) {
+                nxt = (b.neighbors[1] >= 0) ? b.neighbors[1] : b.neighbors[0];
+            }
+            else {
+                nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+            }
+            prev = cur;
+            cur = nxt;
+            if (cur == i) {
+                break;
+            }
+        }
+        if (!ordered.empty()) {
+            ordered.push_back(ordered.front());
+            rings.push_back(std::move(ordered));
+        }
+    }
+
+    const int nRings = std::max(1, static_cast<int>(rings.size()));
+    if (dummyLoop_ != nullptr) {
+        dummyLoop_->numEdges = nRings;
+        dummyLoop_->strandOfEdge.assign(static_cast<size_t>(nRings + 1), 0);
+        dummyLoop_->strandOfEdge[0] = -1;
+    }
+    chains_.assign(static_cast<size_t>(nRings + 1), {});
+    for (int r = 0; r < static_cast<int>(rings.size()); ++r) {
+        chains_[static_cast<size_t>(r + 1)] = rings[static_cast<size_t>(r)];
+    }
+    RebuildSpringsFromChains();
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        FaceBead& fb = neck_->faceBeads[fi];
+        if (fi < rings.size() && rings[fi].size() >= 2) {
+            fb.boundaryBeads.assign(rings[fi].begin(), rings[fi].end() - 1);
+        }
+        fb.RefreshBoundaryDots(*neck_);
+        fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
+    }
+    exteriorBoundaries_.clear();
+    exteriorFaceOrder_.clear();
     RebuildFaceBodiesFromCache();
     structureDirty_ = false;
 }
@@ -1318,7 +1485,7 @@ const FaceBead* Physics::FaceBeadFor(int face) const
 bool Physics::FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const
 {
     if (out == nullptr || face < 0 || face >= static_cast<int>(loop_->faces.size()) ||
-        face == exteriorFace_) {
+        IsExterior(face)) {
         return false;
     }
     out->clear();
@@ -1351,11 +1518,11 @@ void Physics::CollectR3InvolvedFaces(std::unordered_set<int>* out) const
     out->clear();
     const auto addHalf = [&](int h) {
         const auto it = faceOfHalfEdge_.find(h);
-        if (it != faceOfHalfEdge_.end() && it->second != exteriorFace_) {
+        if (it != faceOfHalfEdge_.end() && !IsExterior(it->second)) {
             out->insert(it->second);
         }
     };
-    if (r3Info_.face >= 0 && r3Info_.face != exteriorFace_) {
+    if (r3Info_.face >= 0 && !IsExterior(r3Info_.face)) {
         out->insert(r3Info_.face);
     }
     for (int i = 0; i < 3; ++i) {
@@ -1389,7 +1556,7 @@ double Physics::FaceExcessArea(const FaceBead& fb) const
 
 double Physics::ExcessArea(int face) const
 {
-    if (face == exteriorFace_) {
+    if (IsExterior(face)) {
         return std::numeric_limits<double>::infinity();
     }
     const FaceBead* fb = FaceBeadFor(face);
@@ -1401,7 +1568,7 @@ double Physics::ExcessArea(int face) const
 
 double Physics::IsoperimetricRatio(int face) const
 {
-    if (face == exteriorFace_) {
+    if (IsExterior(face)) {
         return std::numeric_limits<double>::infinity();
     }
     const FaceBead* fb = FaceBeadFor(face);
@@ -1423,7 +1590,7 @@ void Physics::StrikeHoneycombEdges(bool boundariesCurrent,
         struckEdges_.assign(loop_->numEdges + 1, false);
     }
     for (int f = 0; f < static_cast<int>(loop_->faces.size()); ++f) {
-        if (f == exteriorFace_) {
+        if (IsExterior(f)) {
             continue;
         }
         FaceBead* fb = FaceBeadFor(f);
@@ -1462,7 +1629,7 @@ namespace
 
 void Physics::PrintShoelaceDebug(int face) const
 {
-    if (face == exteriorFace_) {
+    if (IsExterior(face)) {
         std::printf("[shoelace] face %d is exterior (infinite area)\n", face);
         return;
     }
@@ -1513,13 +1680,13 @@ double Physics::EdgeExcessScore(int edge) const
     std::vector<double> excesses;
     const auto itPos = faceOfHalfEdge_.find(edge);
     const auto itNeg = faceOfHalfEdge_.find(-edge);
-    if (itPos != faceOfHalfEdge_.end() && itPos->second != exteriorFace_) {
+    if (itPos != faceOfHalfEdge_.end() && !IsExterior(itPos->second)) {
         const FaceBead* fb = FaceBeadFor(itPos->second);
         if (fb != nullptr) {
             excesses.push_back(fb->cachedExcessArea);
         }
     }
-    if (itNeg != faceOfHalfEdge_.end() && itNeg->second != exteriorFace_) {
+    if (itNeg != faceOfHalfEdge_.end() && !IsExterior(itNeg->second)) {
         const FaceBead* fb = FaceBeadFor(itNeg->second);
         if (fb != nullptr) {
             excesses.push_back(fb->cachedExcessArea);
@@ -1810,6 +1977,12 @@ void Physics::StartAutoTighten()
     if (autoActive_ || r3Active_) {
         return;
     }
+    if (unknot_) {
+        autoActive_ = true;
+        framesWaited_ = 0;
+        pendingEdges_.clear();
+        return;
+    }
     autoActive_ = true;
     needsGeometryEval_ = true;
     removedEdgesLastRound_.clear();
@@ -1841,6 +2014,16 @@ void Physics::StopAutoTighten()
 void Physics::AutoStep()
 {
     if (!autoActive_) {
+        return;
+    }
+    if (unknot_) {
+        for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
+            Step();
+        }
+        framesWaited_ += params_->autoStepsPerFrame;
+        if (framesWaited_ >= params_->relaxStepsMax) {
+            autoActive_ = false;
+        }
         return;
     }
     if (pendingEdges_.empty()) {
@@ -2150,7 +2333,7 @@ bool Physics::NeighborHoneycombBlocksRemoval(int edge)
     std::unordered_set<int> faces;
     AppendIncidentFaces(edge, faces);
     for (const int f : faces) {
-        if (f == r3Info_.face || f == exteriorFace_) {
+        if (f == r3Info_.face || IsExterior(f)) {
             continue;
         }
         WalkFaceBoundaryNoDots(f);
@@ -2167,20 +2350,23 @@ bool Physics::HoneycombFloorBlocksRemoval(int edge)
     // Only the infinite face itself being a monogon (phi length 1) must keep
     // its long exterior arc. A finite monogon that merely touches the outer
     // face should still be allowed to tighten after R3.
-    if (EdgeIsLoop(edge) && loop_ != nullptr && exteriorFace_ >= 0 &&
-        exteriorFace_ < static_cast<int>(loop_->faces.size()) &&
-        loop_->faces[static_cast<size_t>(exteriorFace_)].size() == 1) {
+    if (EdgeIsLoop(edge) && loop_ != nullptr) {
         const auto itPos = faceOfHalfEdge_.find(edge);
         const auto itNeg = faceOfHalfEdge_.find(-edge);
-        if ((itPos != faceOfHalfEdge_.end() && itPos->second == exteriorFace_) ||
-            (itNeg != faceOfHalfEdge_.end() && itNeg->second == exteriorFace_)) {
+        const auto exteriorMonogon = [&](int face) {
+            return IsExterior(face) && face >= 0 &&
+                   face < static_cast<int>(loop_->faces.size()) &&
+                   loop_->faces[static_cast<size_t>(face)].size() == 1;
+        };
+        if ((itPos != faceOfHalfEdge_.end() && exteriorMonogon(itPos->second)) ||
+            (itNeg != faceOfHalfEdge_.end() && exteriorMonogon(itNeg->second))) {
             return true;
         }
     }
     std::unordered_set<int> faces;
     AppendIncidentFaces(edge, faces);
     for (const int f : faces) {
-        if (f == exteriorFace_) {
+        if (IsExterior(f)) {
             continue;
         }
         WalkFaceBoundaryNoDots(f);
@@ -2333,7 +2519,7 @@ void Physics::R3PostRepairStep()
 
 bool Physics::StartR3Move(int face)
 {
-    if (r3Active_ || autoActive_) {
+    if (unknot_ || r3Active_ || autoActive_) {
         return false;
     }
     ClearR3State();

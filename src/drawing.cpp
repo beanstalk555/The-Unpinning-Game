@@ -4,6 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <exception>
+#include <functional>
+#include <numeric>
 
 namespace
 {
@@ -139,11 +142,7 @@ DrawnMultiloop BuildMultiloopFromCurves(const std::vector<std::vector<Vector2>>&
         }
     }
 
-    if (crossings.empty()) {
-        if (curves.size() == 1) {
-            result.isUnknot = true;
-            return result;
-        }
+    if (curves.empty()) {
         result.error = "The multiloop is not connected.";
         return result;
     }
@@ -172,87 +171,98 @@ DrawnMultiloop BuildMultiloopFromCurves(const std::vector<std::vector<Vector2>>&
                 walks[c].push_back(app);
             }
         }
-        if (walks[c].empty() && curves.size() > 1) {
-            result.error = "The multiloop is not connected.";
-            return result;
-        }
     }
 
-    // Build edges (arcs between consecutive crossings) and darts. The dart at
-    // the tail of edge k is -k (pointing forward along travel); the dart at
-    // the head is +k (pointing back). epsilon swaps them.
-    std::vector<std::vector<std::pair<float, int>>> dartsAt(crossings.size());
-    std::vector<int> edgeTail(1, 0);
-    std::vector<int> edgeHead(1, 0);
-    std::vector<std::vector<Vector2>> edgePolyline(1);
-    int edgeCount = 0;
-    for (size_t c = 0; c < curves.size(); ++c) {
-        const std::vector<Appearance>& walk = walks[c];
-        const std::vector<Vector2>& curve = curves[c];
-        const int m = static_cast<int>(curve.size());
-        const size_t len = walk.size();
-        for (size_t i = 0; i < len; ++i) {
-            const Appearance& a = walk[i];
-            const Appearance& b = walk[(i + 1) % len];
-            const int k = ++edgeCount;
-
-            // Tail dart at a: forward travel direction.
-            dartsAt[a.crossing].push_back({std::atan2(a.dir.y, a.dir.x), -k});
-            // Head dart at b: reverse of travel direction (points back).
-            dartsAt[b.crossing].push_back({std::atan2(-b.dir.y, -b.dir.x), k});
-
-            edgeTail.push_back(a.crossing);
-            edgeHead.push_back(b.crossing);
-
-            // Arc polyline from crossing a to crossing b (with bend points).
-            std::vector<Vector2> poly;
-            poly.push_back(crossings[a.crossing].pos);
-            const int steps = ((b.segIndex - a.segIndex) % m + m) % m;
-            int seg = a.segIndex;
-            for (int s = 0; s < steps; ++s) {
-                seg = (seg + 1) % m;
-                poly.push_back(curve[seg]);
+    // Screen-space leftmost, so packed components keep the user's left-to-right
+    // order (the reflected copy is only for crossing combinatorics).
+    const auto minXOfCurves = [&](const std::vector<int>& ids) {
+        float minX = 0.0f;
+        bool first = true;
+        for (const int ci : ids) {
+            const std::vector<Vector2>& src = inputCurves[static_cast<size_t>(ci)];
+            for (const Vector2& p : src) {
+                if (first || p.x < minX) {
+                    minX = p.x;
+                    first = false;
+                }
             }
-            poly.push_back(crossings[b.crossing].pos);
-            edgePolyline.push_back(std::move(poly));
+        }
+        return minX;
+    };
+
+    std::vector<int> parent(curves.size());
+    std::iota(parent.begin(), parent.end(), 0);
+    std::function<int(int)> find = [&](int a) {
+        while (parent[static_cast<size_t>(a)] != a) {
+            parent[static_cast<size_t>(a)] = parent[static_cast<size_t>(parent[static_cast<size_t>(a)])];
+            a = parent[static_cast<size_t>(a)];
+        }
+        return a;
+    };
+    const auto unite = [&](int a, int b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) {
+            parent[static_cast<size_t>(a)] = b;
+        }
+    };
+    for (size_t c = 0; c < walks.size(); ++c) {
+        for (const Appearance& app : walks[c]) {
+            for (size_t d = 0; d < walks.size(); ++d) {
+                if (d == c) {
+                    continue;
+                }
+                for (const Appearance& other : walks[d]) {
+                    if (other.crossing == app.crossing) {
+                        unite(static_cast<int>(c), static_cast<int>(d));
+                    }
+                }
+            }
         }
     }
 
-    // sigma: at each crossing, the darts in counterclockwise angular order.
-    std::vector<std::vector<int>> cycles;
-    for (std::vector<std::pair<float, int>>& darts : dartsAt) {
-        std::sort(darts.begin(), darts.end());
-        std::vector<int> cycle;
-        for (const std::pair<float, int>& d : darts) {
-            cycle.push_back(d.second);
-        }
-        cycles.push_back(std::move(cycle));
-    }
-
-    try {
-        result.sigma = Permutation::FromCycles(cycles);
-    }
-    catch (const std::exception& e) {
-        result.error = std::string("Could not build the permutation: ") + e.what();
-        return result;
-    }
-    const std::string message = ValidateMultiloopSigma(result.sigma);
-    if (!message.empty()) {
-        result.error = message;
-        return result;
-    }
-
-    // Pick the unbounded face by signed area. The face traced from a dart
-    // visits the directed arcs of its boundary; the outer face is the unique
-    // one whose orientation is opposite to all the (interior) others.
-    const Multiloop loop(result.sigma);
-    int bestFace = 0;
+    struct CurveGroup
     {
+        std::vector<int> curves;
+        float minX = 0.0f;
+        bool hasCrossings = false;
+    };
+    std::vector<CurveGroup> groups;
+    {
+        std::vector<std::vector<int>> byRoot(curves.size());
+        for (int c = 0; c < static_cast<int>(curves.size()); ++c) {
+            byRoot[static_cast<size_t>(find(c))].push_back(c);
+        }
+        for (std::vector<int>& ids : byRoot) {
+            if (ids.empty()) {
+                continue;
+            }
+            CurveGroup group;
+            group.curves = std::move(ids);
+            group.minX = minXOfCurves(group.curves);
+            for (const int ci : group.curves) {
+                if (!walks[static_cast<size_t>(ci)].empty()) {
+                    group.hasCrossings = true;
+                }
+            }
+            groups.push_back(std::move(group));
+        }
+    }
+    std::sort(groups.begin(), groups.end(),
+              [](const CurveGroup& a, const CurveGroup& b) { return a.minX < b.minX; });
+
+    const auto pickExteriorHalfEdge = [&](const Multiloop& loop,
+                                          const std::vector<std::vector<Vector2>>& edgePolyline) {
+        int bestFace = 0;
         std::vector<double> areas(loop.faces.size(), 0.0);
         for (size_t f = 0; f < loop.faces.size(); ++f) {
             std::vector<Vector2> poly;
             for (const int h : loop.faces[f]) {
-                const std::vector<Vector2>& arc = edgePolyline[std::abs(h)];
+                const int k = std::abs(h);
+                if (k <= 0 || k >= static_cast<int>(edgePolyline.size())) {
+                    continue;
+                }
+                const std::vector<Vector2>& arc = edgePolyline[static_cast<size_t>(k)];
                 if (h > 0) {
                     for (size_t i = arc.size() - 1; i > 0; --i) {
                         poly.push_back(arc[i]);
@@ -305,7 +315,184 @@ DrawnMultiloop BuildMultiloopFromCurves(const std::vector<std::vector<Vector2>>&
                 }
             }
         }
+        if (bestFace < 0 || bestFace >= static_cast<int>(loop.faces.size()) ||
+            loop.faces[static_cast<size_t>(bestFace)].empty()) {
+            return 0;
+        }
+        return loop.faces[static_cast<size_t>(bestFace)].front();
+    };
+
+    std::vector<std::vector<int>> allCycles;
+    int nextLabel = 1;
+    std::vector<int> componentExteriorHalfEdge;
+    for (const CurveGroup& group : groups) {
+        if (!group.hasCrossings) {
+            for (const int ci : group.curves) {
+                MultiloopComponent circle;
+                circle.kind = MultiloopPart::Circle;
+                circle.strand = ci;
+                result.components.push_back(std::move(circle));
+                componentExteriorHalfEdge.push_back(0);
+            }
+            continue;
+        }
+
+        std::vector<std::vector<std::pair<float, int>>> dartsAt(crossings.size());
+        std::vector<std::vector<Vector2>> edgePolyline(1);
+        std::vector<int> localCurveOfEdge(1, -1);
+        int edgeCount = 0;
+        for (const int ci : group.curves) {
+            const std::vector<Appearance>& walk = walks[static_cast<size_t>(ci)];
+            const std::vector<Vector2>& curve = curves[static_cast<size_t>(ci)];
+            const int m = static_cast<int>(curve.size());
+            const size_t len = walk.size();
+            for (size_t i = 0; i < len; ++i) {
+                const Appearance& a = walk[i];
+                const Appearance& b = walk[(i + 1) % len];
+                const int k = ++edgeCount;
+                localCurveOfEdge.push_back(ci);
+                dartsAt[static_cast<size_t>(a.crossing)].push_back({std::atan2(a.dir.y, a.dir.x), -k});
+                dartsAt[static_cast<size_t>(b.crossing)].push_back({std::atan2(-b.dir.y, -b.dir.x), k});
+
+                std::vector<Vector2> poly;
+                poly.push_back(crossings[static_cast<size_t>(a.crossing)].pos);
+                const int steps = ((b.segIndex - a.segIndex) % m + m) % m;
+                int seg = a.segIndex;
+                for (int s = 0; s < steps; ++s) {
+                    seg = (seg + 1) % m;
+                    poly.push_back(curve[static_cast<size_t>(seg)]);
+                }
+                poly.push_back(crossings[static_cast<size_t>(b.crossing)].pos);
+                edgePolyline.push_back(std::move(poly));
+            }
+        }
+
+        std::vector<std::vector<int>> cycles;
+        for (std::vector<std::pair<float, int>>& darts : dartsAt) {
+            if (darts.empty()) {
+                continue;
+            }
+            std::sort(darts.begin(), darts.end());
+            std::vector<int> cycle;
+            for (const std::pair<float, int>& d : darts) {
+                cycle.push_back(d.second);
+            }
+            cycles.push_back(std::move(cycle));
+        }
+
+        Permutation localSigma;
+        try {
+            localSigma = Permutation::FromCycles(cycles);
+        }
+        catch (const std::exception& e) {
+            result.error = std::string("Could not build the permutation: ") + e.what();
+            return result;
+        }
+        const std::string message = ValidateMultiloopSigma(localSigma);
+        if (!message.empty()) {
+            result.error = message;
+            return result;
+        }
+
+        const int offset = nextLabel - 1;
+        const auto shift = [&](int h) {
+            return (h > 0) ? (h + offset) : (h - offset);
+        };
+        for (std::vector<int>& cycle : cycles) {
+            for (int& h : cycle) {
+                h = shift(h);
+            }
+        }
+        for (const std::vector<int>& cycle : cycles) {
+            allCycles.push_back(cycle);
+        }
+
+        MultiloopComponent part;
+        part.kind = MultiloopPart::Crossings;
+        for (int k = nextLabel; k < nextLabel + edgeCount; ++k) {
+            part.halfEdges.push_back(k);
+            part.halfEdges.push_back(-k);
+        }
+
+        const Multiloop localLoop(localSigma);
+        const int localExterior = pickExteriorHalfEdge(localLoop, edgePolyline);
+        const int globalExterior = (localExterior == 0) ? 0 : shift(localExterior);
+        result.strandOfEdge.resize(static_cast<size_t>(nextLabel + edgeCount), -1);
+        for (int k = 1; k <= edgeCount; ++k) {
+            result.strandOfEdge[static_cast<size_t>(nextLabel - 1 + k)] =
+                localCurveOfEdge[static_cast<size_t>(k)];
+        }
+        nextLabel += edgeCount;
+        result.components.push_back(std::move(part));
+        componentExteriorHalfEdge.push_back(globalExterior);
+        if (result.exteriorHalfEdge == 0) {
+            result.exteriorHalfEdge = globalExterior;
+        }
     }
-    result.exteriorHalfEdge = loop.faces[bestFace].front();
+
+    int circleCount = 0;
+    int crossingCount = 0;
+    for (const MultiloopComponent& c : result.components) {
+        if (c.kind == MultiloopPart::Circle) {
+            ++circleCount;
+        }
+        else {
+            ++crossingCount;
+        }
+    }
+    result.isUnknot = (circleCount == 1 && crossingCount == 0);
+
+    if (allCycles.empty()) {
+        return result;
+    }
+
+    try {
+        result.sigma = Permutation::FromCycles(allCycles);
+    }
+    catch (const std::exception& e) {
+        result.error = std::string("Could not build the permutation: ") + e.what();
+        return result;
+    }
+    const std::string message = ValidateMultiloopSigma(result.sigma);
+    if (!message.empty()) {
+        result.error = message;
+        return result;
+    }
+
+    const Multiloop loop(result.sigma);
+    for (size_t i = 0; i < result.components.size(); ++i) {
+        if (result.components[i].kind != MultiloopPart::Crossings) {
+            continue;
+        }
+        const int h = componentExteriorHalfEdge[i];
+        if (h != 0) {
+            result.components[i].exteriorFace = FaceIndexContainingHalfEdge(loop, h);
+        }
+    }
     return result;
+}
+
+void ApplyDrawnStrandColors(Multiloop& loop, const DrawnMultiloop& drawn)
+{
+    const int n = loop.numEdges;
+    if (n > 0 && static_cast<int>(drawn.strandOfEdge.size()) > n) {
+        for (int k = 1; k <= n; ++k) {
+            const int s = drawn.strandOfEdge[static_cast<size_t>(k)];
+            if (s >= 0) {
+                loop.strandOfEdge[static_cast<size_t>(k)] = s;
+            }
+        }
+    }
+    int maxS = loop.numStrands - 1;
+    for (int k = 1; k <= n; ++k) {
+        maxS = std::max(maxS, loop.strandOfEdge[static_cast<size_t>(k)]);
+    }
+    for (const MultiloopComponent& component : drawn.components) {
+        if (component.kind == MultiloopPart::Circle && component.strand >= 0) {
+            maxS = std::max(maxS, component.strand);
+        }
+    }
+    if (maxS >= 0) {
+        loop.numStrands = std::max(loop.numStrands, maxS + 1);
+    }
 }

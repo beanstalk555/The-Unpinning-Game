@@ -12,7 +12,8 @@ public:
     Permutation() = default; // identity
 
     static Permutation FromCycles(const std::vector<std::vector<int>>& cycles);
-    // Parses cycle notation, e.g. "(6,1,-7,-2)(11,2,-12,-3)".
+    // Parses cycle notation, e.g. "(6,1,-7,-2)(11,2,-12,-3)". Empty () cycles
+    // are ignored (see ParseCycleNotation to keep them).
     static Permutation FromString(const std::string& s);
 
     int Apply(int h) const;
@@ -36,6 +37,10 @@ private:
     // equal exactly when their maps are equal.
     std::unordered_map<int, int> map;
 };
+
+// Parses cycle notation into a sequence of cycles. Empty () / [] groups are
+// kept as empty vectors (circles). Does not apply PD-style sign rewriting.
+std::vector<std::vector<int>> ParseCycleNotation(const std::string& s);
 
 // The standard edge involution (-1,1)(-2,2)...(-n,n), i.e. h -> -h.
 Permutation MakeEdgeInvolution(int n);

@@ -32,6 +32,9 @@ struct Bead
     // neighbors along the +k direction (vertex or edge beads).
     int edge = -1;
     int neighbors[2] = {-1, -1};
+    // Color index for crossing-free circle beads (and packed unknot rings).
+    // Crossing edge beads keep -1 and use Multiloop::strandOfEdge instead.
+    int strand = -1;
 
     // Vertex beads: the crossing index, its sigma cycle (counterclockwise
     // half-edges), and the adjacent edge bead in each half-edge direction:
@@ -99,3 +102,13 @@ void WalkFaceBoundaryFromPhiCycle(const std::vector<int>& phiCycle, const Neckla
                                   bool computeDots = true);
 
 Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout, int exteriorFace);
+Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout,
+                       const std::unordered_set<int>& exteriorFaces);
+Necklace BuildPackedNecklace(const Multiloop& loop, const PackedGridLayout& packed,
+                             const std::vector<MultiloopComponent>& components);
+
+// Unit-square necklace for the 1-region unknot (no crossings): 8 edge beads
+// around the boundary and one interior face bead.
+Necklace BuildUnknotNecklace();
+GridLayout UnknotGridLayout();
+void AppendCircleToNecklace(Necklace& necklace, BeadPos origin, int label, int strand);

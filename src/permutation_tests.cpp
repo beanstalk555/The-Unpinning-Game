@@ -10,6 +10,7 @@
 #include "geometry.h"
 
 #include <set>
+#include <unordered_set>
 
 #include <cmath>
 
@@ -279,8 +280,10 @@ bool RunPermutationTests()
     Check(loop2.numStrands == 2, "example 2 has two strands");
 
     // Validation rejects bad input.
-    Check(!ValidateMultiloopSigma(Permutation::FromString("(1,2,-1,-2)(3,-3,4,-4)")).empty(),
-          "validation rejects a disconnected diagram");
+    Check(ValidateMultiloopSigma(Permutation::FromString("(1,-1,2,-2)(3,-3,4,-4)")).empty(),
+          "validation accepts a disconnected diagram");
+    Check(!ValidateMultiloopSigma(Permutation::FromString("(1,2,-1,-2)")).empty(),
+          "validation rejects a non-planar 4-cycle");
     Check(!ValidateMultiloopSigma(Permutation::FromString("(1,2,-1)")).empty(),
           "validation rejects non-4-valent sigma");
 
@@ -797,6 +800,300 @@ bool RunPermutationTests()
         }};
         const DrawnMultiloop drawn = BuildMultiloopFromCurves(curves);
         Check(drawn.isUnknot, "crossing-free loop is detected as the unknot");
+    }
+
+    // Disconnected sigma, packed layout, and mixed drawings.
+    {
+        const auto kindsOf = [](const std::string& s) {
+            return ParseSigmaNotation(s).components;
+        };
+        const auto kindList = [](const std::vector<MultiloopComponent>& comps) {
+            std::vector<MultiloopPart> kinds;
+            for (const MultiloopComponent& c : comps) {
+                kinds.push_back(c.kind);
+            }
+            return kinds;
+        };
+        const auto expectKinds = [&](const std::string& s, const std::vector<MultiloopPart>& want,
+                                     const char* desc) {
+            const std::vector<MultiloopPart> got = kindList(kindsOf(s));
+            Check(got == want, desc);
+        };
+        expectKinds("()(1,-1,2,-2)", {MultiloopPart::Circle, MultiloopPart::Crossings},
+                    "() then figure-eight is circle then crossings");
+        expectKinds("(1,-1,2,-2)()", {MultiloopPart::Crossings, MultiloopPart::Circle},
+                    "figure-eight then () is crossings then circle");
+        expectKinds("(1,-1,2,-2)(3,-3,4,-4)",
+                    {MultiloopPart::Crossings, MultiloopPart::Crossings},
+                    "two figure-eights are two crossing components");
+        expectKinds("(-1,3,4,-4)()(1,2,-2,-3)",
+                    {MultiloopPart::Crossings, MultiloopPart::Circle},
+                    "connected 2-crossing loop then circle");
+        expectKinds("()()", {MultiloopPart::Circle, MultiloopPart::Circle},
+                    "()() is two circles");
+
+        const SigmaNotation mixed = ParseSigmaNotation("()(1,-1,2,-2)");
+        Check(FormatSigmaNotation(mixed.sigma, mixed.components).find("()") == 0,
+              "format keeps a leading empty cycle");
+        const SigmaNotation trailing = ParseSigmaNotation("(1,-1,2,-2)()");
+        const std::string trailingText = FormatSigmaNotation(trailing.sigma, trailing.components);
+        Check(trailingText.size() >= 2 && trailingText.substr(trailingText.size() - 2) == "()",
+              "format keeps a trailing empty cycle");
+
+        Check(ValidateMultiloopSigma(mixed.sigma).empty(), "figure-eight component validates");
+        Check(ValidateMultiloopSigma(ParseSigmaNotation("()()").sigma).empty(),
+              "circles-only sigma validates");
+
+        {
+            const SigmaNotation two = ParseSigmaNotation("(1,-1,2,-2)(3,-3,4,-4)");
+            Check(ValidateMultiloopSigma(two.sigma).empty(), "two figure-eights validate");
+            const Multiloop loop(two.sigma);
+            Check(loop.numEdges == 4, "two figure-eights have 4 edges");
+            Check(loop.sigma.Cycles().size() == 2, "two figure-eights have 2 crossings");
+            std::vector<MultiloopComponent> comps = two.components;
+            ApplyDefaultExteriors(loop, comps);
+            try {
+                const PackedGridLayout packed = ComputePackedGridLayout(loop, comps);
+                Check(packed.layout.edgePaths.size() == 4, "packed layout has 4 edge paths");
+                Check(packed.layout.crossingPositions.size() == 2,
+                      "packed layout has 2 crossing positions");
+                Check(packed.componentOrigin.size() == 2, "packed layout has two component slots");
+                const Necklace necklace = BuildPackedNecklace(loop, packed, comps);
+                Check(necklace.crossingBead.size() == 2, "packed necklace has 2 vertex beads");
+                int circleBeads = 0;
+                for (const Bead& b : necklace.beads) {
+                    if (!b.isVertex && b.edge == 0) {
+                        ++circleBeads;
+                    }
+                }
+                Check(circleBeads == 0, "two figure-eights have no circle beads");
+
+                const int firstExterior = comps[0].exteriorFace;
+                GridPoint firstCrossing = packed.layout.crossingPositions[0];
+                int otherFace = -1;
+                for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {
+                    if (ComponentOwnsFace(comps[1], loop, f) && f != comps[1].exteriorFace) {
+                        otherFace = f;
+                        break;
+                    }
+                }
+                Check(otherFace >= 0, "second figure-eight has another face to select");
+                if (otherFace >= 0) {
+                    comps[1].exteriorFace = otherFace;
+                    const PackedGridLayout packed2 = ComputePackedGridLayout(loop, comps);
+                    Check(packed2.layout.crossingPositions[0].x == firstCrossing.x &&
+                              packed2.layout.crossingPositions[0].y == firstCrossing.y,
+                          "changing the other component exterior does not move the first drawing");
+                    Check(comps[0].exteriorFace == firstExterior,
+                          "first component exterior is unchanged");
+                }
+            }
+            catch (const std::exception& e) {
+                Check(false, (std::string("packed two figure-eights: ") + e.what()).c_str());
+            }
+        }
+
+        {
+            const SigmaNotation circled = ParseSigmaNotation("()(1,-1,2,-2)");
+            const Multiloop loop(circled.sigma);
+            std::vector<MultiloopComponent> comps = circled.components;
+            ApplyDefaultExteriors(loop, comps);
+            try {
+                const PackedGridLayout packed = ComputePackedGridLayout(loop, comps);
+                Check(packed.layout.edgePaths.size() == 2, "circle+figure-eight has 2 edge paths");
+                Check(packed.layout.crossingPositions.size() == 1,
+                      "circle+figure-eight has 1 crossing");
+                const Necklace necklace = BuildPackedNecklace(loop, packed, comps);
+                int circleBeads = 0;
+                int circleFaces = 0;
+                for (const Bead& b : necklace.beads) {
+                    if (!b.isVertex && b.edge == 0) {
+                        ++circleBeads;
+                    }
+                }
+                for (const FaceBead& fb : necklace.faceBeads) {
+                    if (fb.face < 0) {
+                        ++circleFaces;
+                    }
+                }
+                Check(circleBeads == 8, "circle component contributes 8 edge beads");
+                Check(circleFaces == 1, "circle component contributes one face bead");
+            }
+            catch (const std::exception& e) {
+                Check(false, (std::string("packed circle+figure-eight: ") + e.what()).c_str());
+            }
+        }
+
+        {
+            std::vector<std::vector<Vector2>> squares = {
+                {{0.0f, 0.0f}, {80.0f, 0.0f}, {80.0f, 80.0f}, {0.0f, 80.0f}},
+                {{200.0f, 0.0f}, {280.0f, 0.0f}, {280.0f, 80.0f}, {200.0f, 80.0f}},
+            };
+            const DrawnMultiloop drawn = BuildMultiloopFromCurves(squares);
+            Check(drawn.error.empty(), "two disjoint squares build without error");
+            Check(!drawn.isUnknot, "two disjoint squares are not a single unknot");
+            Check(drawn.components.size() == 2, "two disjoint squares are two components");
+            if (drawn.components.size() == 2) {
+                Check(drawn.components[0].kind == MultiloopPart::Circle &&
+                          drawn.components[1].kind == MultiloopPart::Circle,
+                      "two disjoint squares are two circles");
+                Check(drawn.components[0].strand == 0 && drawn.components[1].strand == 1,
+                      "two disjoint squares keep left-to-right drawing colors");
+            }
+        }
+
+        {
+            std::vector<std::vector<Vector2>> mixedDraw = {
+                {{0.0f, 0.0f}, {80.0f, 0.0f}, {80.0f, 80.0f}, {0.0f, 80.0f}},
+                {{200.0f, 200.0f}, {400.0f, 400.0f}, {400.0f, 200.0f}, {200.0f, 400.0f}},
+            };
+            const DrawnMultiloop drawn = BuildMultiloopFromCurves(mixedDraw);
+            Check(drawn.error.empty(), "square + figure-eight drawing builds without error");
+            Check(!drawn.isUnknot, "square + figure-eight is not the unknot");
+            bool sawCircle = false;
+            bool sawCrossings = false;
+            for (const MultiloopComponent& c : drawn.components) {
+                if (c.kind == MultiloopPart::Circle) {
+                    sawCircle = true;
+                }
+                if (c.kind == MultiloopPart::Crossings) {
+                    sawCrossings = true;
+                }
+            }
+            Check(sawCircle && sawCrossings, "square + figure-eight is mixed circle and crossings");
+            if (drawn.error.empty() && sawCrossings) {
+                const Multiloop loop(drawn.sigma);
+                Check(loop.sigma.Cycles().size() == 1, "mixed drawing has 1 crossing");
+                Check(loop.numEdges == 2, "mixed drawing has 2 edges");
+            }
+        }
+
+        {
+            const SigmaNotation twoCircles = ParseSigmaNotation("()()");
+            const Permutation empty;
+            const Multiloop dummy(empty);
+            std::vector<MultiloopComponent> comps = twoCircles.components;
+            const PackedGridLayout packed = ComputePackedGridLayout(dummy, comps);
+            const Necklace necklace = BuildPackedNecklace(dummy, packed, comps);
+            std::set<int> strands;
+            for (const Bead& b : necklace.beads) {
+                if (!b.isVertex && b.edge == 0) {
+                    strands.insert(b.strand);
+                }
+            }
+            Check(strands.count(0) == 1 && strands.count(1) == 1 && strands.size() == 2,
+                  "two packed circles use distinct strand colors");
+        }
+
+        {
+            std::vector<std::vector<Vector2>> mixedDraw = {
+                {{0.0f, 0.0f}, {80.0f, 0.0f}, {40.0f, 70.0f}},
+                {{200.0f, 200.0f}, {400.0f, 400.0f}, {400.0f, 200.0f}, {200.0f, 400.0f}},
+            };
+            const DrawnMultiloop drawn = BuildMultiloopFromCurves(mixedDraw);
+            Check(drawn.error.empty(), "triangle + figure-eight drawing builds without error");
+            if (drawn.error.empty()) {
+                Check(drawn.components.size() == 2, "triangle + figure-eight has two components");
+                if (drawn.components.size() == 2) {
+                    Check(drawn.components[0].kind == MultiloopPart::Circle &&
+                              drawn.components[0].strand == 0,
+                          "left triangle is circle strand 0");
+                    Check(drawn.components[1].kind == MultiloopPart::Crossings,
+                          "right figure-eight is a crossing component");
+                }
+                try {
+                    Multiloop loop(drawn.sigma);
+                    ApplyDrawnStrandColors(loop, drawn);
+                    Check(loop.numStrands >= 2, "drawn mixed diagram keeps both curve colors");
+                    bool eightIsStrand1 = loop.numEdges >= 1;
+                    for (int k = 1; k <= loop.numEdges; ++k) {
+                        eightIsStrand1 = eightIsStrand1 && loop.strandOfEdge[static_cast<size_t>(k)] == 1;
+                    }
+                    Check(eightIsStrand1, "figure-eight edges keep drawing color 1");
+                    std::vector<MultiloopComponent> comps = drawn.components;
+                    ApplyDefaultExteriors(loop, comps);
+                    const PackedGridLayout packed = ComputePackedGridLayout(loop, comps);
+                    Check(packed.componentOrigin.size() >= 2 &&
+                              packed.componentOrigin[0].x < packed.componentOrigin[1].x,
+                          "triangle packs to the left of the figure-eight");
+                    Necklace neck = BuildPackedNecklace(loop, packed, comps);
+                    int circleStrand = -1;
+                    for (const Bead& b : neck.beads) {
+                        if (!b.isVertex && b.edge == 0) {
+                            circleStrand = b.strand;
+                            break;
+                        }
+                    }
+                    Check(circleStrand == 0, "packed triangle circle uses drawing color 0");
+                    PhysicsParams params;
+                    std::unordered_set<int> exteriors;
+                    for (const int f : ExteriorFaceIndices(comps)) {
+                        exteriors.insert(f);
+                    }
+                    Physics phys(loop, neck, params, exteriors);
+                    phys.Step();
+                    phys.RefreshTangle();
+                    Check(true, "triangle + figure-eight packed physics runs");
+                }
+                catch (const std::exception& e) {
+                    Check(false, (std::string("triangle + figure-eight pipeline: ") + e.what()).c_str());
+                }
+            }
+        }
+
+        {
+            const auto polar = [](float cx, float cy, float r, float a) {
+                return Vector2{cx + r * std::cos(a), cy + r * std::sin(a)};
+            };
+            std::vector<Vector2> pentagon;
+            for (int i = 0; i < 5; ++i) {
+                const float a = -1.5707963f + static_cast<float>(i) * (6.2831853f / 5.0f);
+                pentagon.push_back(polar(0.0f, 0.0f, 140.0f, a));
+            }
+            const std::vector<Vector2> star = {pentagon[0], pentagon[2], pentagon[4], pentagon[1],
+                                               pentagon[3]};
+            const auto triangle = [&](float cx, float cy, float r, float rot) {
+                std::vector<Vector2> pts;
+                for (int i = 0; i < 3; ++i) {
+                    pts.push_back(polar(cx, cy, r, rot + static_cast<float>(i) * 2.0943951f));
+                }
+                return pts;
+            };
+            std::vector<std::vector<Vector2>> curves = {
+                star,
+                triangle(420.0f, 0.0f, 100.0f, -1.5707963f),
+                triangle(420.0f, 0.0f, 100.0f, 1.5707963f),
+            };
+            const DrawnMultiloop drawn = BuildMultiloopFromCurves(curves);
+            Check(drawn.error.empty(), "pentagram + star of david builds without error");
+            if (!drawn.error.empty()) {
+                Check(false, drawn.error.c_str());
+            }
+            else {
+                try {
+                    const Multiloop loop(drawn.sigma);
+                    std::vector<MultiloopComponent> comps = drawn.components;
+                    ApplyDefaultExteriors(loop, comps);
+                    Check(comps.size() >= 2, "pentagram + star of david has two components");
+                    const PackedGridLayout packed = ComputePackedGridLayout(loop, comps);
+                    Necklace neck = BuildPackedNecklace(loop, packed, comps);
+                    PhysicsParams params;
+                    std::unordered_set<int> exteriors;
+                    for (const int f : ExteriorFaceIndices(comps)) {
+                        exteriors.insert(f);
+                    }
+                    Physics phys(loop, neck, params, exteriors);
+                    phys.Step();
+                    phys.RefreshTangle();
+                    Check(packed.layout.crossingPositions.size() == loop.sigma.Cycles().size(),
+                          "packed pentagram + star of david has a position per crossing");
+                }
+                catch (const std::exception& e) {
+                    Check(false,
+                          (std::string("pentagram + star of david pipeline: ") + e.what()).c_str());
+                }
+            }
+        }
     }
 
     // ---- Tangle helpers: opposite-slot linking and open segment crossings ----

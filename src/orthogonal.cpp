@@ -901,3 +901,139 @@ double GridFaceArea(const Multiloop& loop, const GridLayout& layout, int face)
 {
     return ShoelaceArea(GridFacePolygon(loop, layout, face));
 }
+
+namespace
+{
+    constexpr int kPackGap = 2;
+
+    GridPoint OffsetPoint(GridPoint p, int dx, int dy)
+    {
+        p.x += dx;
+        p.y += dy;
+        return p;
+    }
+
+    int LocalExteriorFace(const Multiloop& globalLoop, const Multiloop& localLoop,
+                          const DenseRelabel& relabel, const MultiloopComponent& component)
+    {
+        int globalFace = component.exteriorFace;
+        if (globalFace < 0 || globalFace >= static_cast<int>(globalLoop.faces.size()) ||
+            !ComponentOwnsFace(component, globalLoop, globalFace)) {
+            globalFace = FirstFaceOnComponent(globalLoop, component.halfEdges);
+        }
+        if (globalFace < 0 || globalFace >= static_cast<int>(globalLoop.faces.size())) {
+            return 0;
+        }
+        for (const int h : globalLoop.faces[static_cast<size_t>(globalFace)]) {
+            const auto it = relabel.globalToLocal.find(h);
+            if (it == relabel.globalToLocal.end()) {
+                continue;
+            }
+            const int localFace = FaceIndexContainingHalfEdge(localLoop, it->second);
+            if (localFace >= 0) {
+                return localFace;
+            }
+        }
+        return 0;
+    }
+}
+
+PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
+                                         const std::vector<MultiloopComponent>& componentsIn)
+{
+    std::vector<MultiloopComponent> components = componentsIn;
+    if (components.empty() && loop.numEdges > 0) {
+        MultiloopComponent part;
+        part.kind = MultiloopPart::Crossings;
+        part.halfEdges.reserve(static_cast<size_t>(2 * loop.numEdges));
+        for (int k = 1; k <= loop.numEdges; ++k) {
+            part.halfEdges.push_back(k);
+            part.halfEdges.push_back(-k);
+        }
+        part.exteriorFace = 0;
+        components.push_back(std::move(part));
+    }
+
+    PackedGridLayout packed;
+    packed.componentOrigin.assign(components.size(), {});
+    packed.componentWidth.assign(components.size(), 0);
+    packed.componentHeight.assign(components.size(), 0);
+    if (loop.numEdges > 0) {
+        packed.layout.edgePaths.resize(static_cast<size_t>(loop.numEdges));
+        packed.layout.crossingPositions.resize(loop.sigma.Cycles().size());
+    }
+
+    std::unordered_map<int, int> globalCrossingOf;
+    const std::vector<std::vector<int>> globalCycles = loop.sigma.Cycles();
+    for (int c = 0; c < static_cast<int>(globalCycles.size()); ++c) {
+        for (const int h : globalCycles[static_cast<size_t>(c)]) {
+            globalCrossingOf[h] = c;
+        }
+    }
+
+    int cursor = 0;
+    int maxHeight = 0;
+    for (size_t i = 0; i < components.size(); ++i) {
+        if (i > 0) {
+            cursor += kPackGap;
+        }
+        const MultiloopComponent& component = components[i];
+        int width = 1;
+        int height = 1;
+        if (component.kind == MultiloopPart::Circle) {
+            packed.componentOrigin[i] = {cursor, 0};
+        }
+        else {
+            const DenseRelabel relabel = RelabelComponent(loop.sigma, component.halfEdges);
+            if (relabel.localSigma.MaxAbsLabel() <= 0) {
+                throw std::runtime_error("crossing component has no edges");
+            }
+            const Multiloop localLoop(relabel.localSigma);
+            const int localExterior = LocalExteriorFace(loop, localLoop, relabel, component);
+            GridLayout local = ComputeGridLayout(localLoop, localExterior);
+            width = local.width;
+            height = local.height;
+            packed.componentOrigin[i] = {cursor, 0};
+            for (int k = 1; k <= localLoop.numEdges; ++k) {
+                const auto git = relabel.localToGlobal.find(k);
+                if (git == relabel.localToGlobal.end()) {
+                    continue;
+                }
+                const int globalK = git->second;
+                if (globalK < 1 || globalK > loop.numEdges) {
+                    continue;
+                }
+                std::vector<GridPoint> path = local.edgePaths[static_cast<size_t>(k - 1)];
+                for (GridPoint& p : path) {
+                    p = OffsetPoint(p, cursor, 0);
+                }
+                packed.layout.edgePaths[static_cast<size_t>(globalK - 1)] = std::move(path);
+            }
+            const std::vector<std::vector<int>> localCycles = localLoop.sigma.Cycles();
+            for (int lc = 0; lc < static_cast<int>(localCycles.size()); ++lc) {
+                if (localCycles[static_cast<size_t>(lc)].empty()) {
+                    continue;
+                }
+                const int lh = localCycles[static_cast<size_t>(lc)].front();
+                const auto git = relabel.localToGlobal.find(lh);
+                if (git == relabel.localToGlobal.end()) {
+                    continue;
+                }
+                const auto cit = globalCrossingOf.find(git->second);
+                if (cit == globalCrossingOf.end()) {
+                    continue;
+                }
+                packed.layout.crossingPositions[static_cast<size_t>(cit->second)] =
+                    OffsetPoint(local.crossingPositions[static_cast<size_t>(lc)], cursor, 0);
+            }
+        }
+        packed.componentWidth[i] = width;
+        packed.componentHeight[i] = height;
+        cursor += width;
+        maxHeight = std::max(maxHeight, height);
+    }
+
+    packed.layout.width = (components.empty()) ? 0 : cursor;
+    packed.layout.height = maxHeight;
+    return packed;
+}

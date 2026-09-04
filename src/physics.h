@@ -2,6 +2,7 @@
 
 #include <raylib.h>
 
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -47,6 +48,10 @@ class Physics
 public:
     Physics(const Multiloop& loop, Necklace& necklace, PhysicsParams& params,
             int exteriorFace);
+    Physics(const Multiloop& loop, Necklace& necklace, PhysicsParams& params,
+            std::unordered_set<int> exteriorFaces);
+    // Crossing-free unknot: springs and collisions on a closed bead ring.
+    Physics(Necklace& necklace, PhysicsParams& params);
 
     // Advance the simulation by one displayed frame.
     void Step();
@@ -136,9 +141,13 @@ private:
     Vector2& VelOf(int body);
 
     void RebuildStructures();
+    void RebuildUnknotStructures();
     void RebuildSpringsFromChains();
     void RefreshEdgeSprings(int edge);
     void FlattenSpringsFromEdges();
+    void AppendCircleSprings();
+    bool IsExterior(int face) const;
+    int ExteriorSlot(int face) const;
     void RebuildFaceGeometry();
     void RebuildFaceBodiesFromCache();
     void RefreshFaceBody(int face);
@@ -190,9 +199,11 @@ private:
                               const std::unordered_set<int>& refreshFaces);
 
     const Multiloop* loop_;
+    std::unique_ptr<Multiloop> dummyLoop_;
     Necklace* neck_;
     PhysicsParams* params_;
     int exteriorFace_ = -1;
+    std::unordered_set<int> exteriorFaces_;
     std::unordered_map<int, int> faceOfHalfEdge_;
     float radius_;
     float diameter_;
@@ -206,9 +217,11 @@ private:
     std::vector<std::pair<int, int>> springs_;  // body pairs, rest = diameter
     std::vector<std::vector<std::pair<int, int>>> edgeSprings_; // edgeSprings_[k]
     std::vector<std::vector<int>> faceBodies_;  // per face: [faceBody?, boundary...]
-    std::vector<int> exteriorBoundary_;
+    std::vector<std::vector<int>> exteriorBoundaries_;
+    std::vector<int> exteriorFaceOrder_;
     SpatialDiskGrid collisionGrid_;
     bool structureDirty_ = true;
+    bool unknot_ = false;
     float sharpDotThreshold_ = -1.0f;
 
     double stretch_ = 0.0;

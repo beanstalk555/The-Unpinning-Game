@@ -166,7 +166,8 @@ bool ComputeR3Sigma(const Multiloop& loop, const R3FaceInfo& info, Permutation* 
 
 std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
                                       const R3FaceInfo& info, const int meeting[3],
-                                      int oldExteriorFace, int* newExteriorFace)
+                                      const std::vector<int>& oldExteriorFaces,
+                                      std::vector<int>* newExteriorFaces)
 {
     // ---- Phase 1: validate and compute; nothing is mutated until every
     // check has passed, so a failure leaves the necklace untouched. ----
@@ -296,15 +297,27 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
         }
     }
 
-    // Match old faces (face beads plus the exterior) to new faces by
-    // half-edge overlap. Faces away from the triangle match exactly; the
+    // Match old faces (face beads plus every component exterior) to new faces
+    // by half-edge overlap. Faces away from the triangle match exactly; the
     // affected ones keep enough labels for a best-overlap assignment.
     std::vector<int> oldFacesNeeded;
-    oldFacesNeeded.reserve(neck.faceBeads.size() + 1);
-    for (const FaceBead& fb : neck.faceBeads) {
+    std::vector<int> faceBeadAssignIndex(neck.faceBeads.size(), -1);
+    oldFacesNeeded.reserve(neck.faceBeads.size() + oldExteriorFaces.size());
+    for (size_t fi = 0; fi < neck.faceBeads.size(); ++fi) {
+        const FaceBead& fb = neck.faceBeads[fi];
+        if (fb.face < 0) {
+            continue;
+        }
+        faceBeadAssignIndex[fi] = static_cast<int>(oldFacesNeeded.size());
         oldFacesNeeded.push_back(fb.face);
     }
-    oldFacesNeeded.push_back(oldExteriorFace);
+    const size_t exteriorStart = oldFacesNeeded.size();
+    for (const int of : oldExteriorFaces) {
+        if (of < 0) {
+            continue;
+        }
+        oldFacesNeeded.push_back(of);
+    }
 
     struct Candidate
     {
@@ -446,10 +459,13 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
         neck.crossingBead[static_cast<size_t>(it->second)] = static_cast<int>(bi);
     }
 
-    // Face beads onto the new faces.
+    // Face beads onto the new faces. Circle beads (face < 0) stay as-is.
     for (size_t fi = 0; fi < neck.faceBeads.size(); ++fi) {
         FaceBead& fb = neck.faceBeads[fi];
-        const int nf = assignment[fi];
+        if (fb.face < 0 || faceBeadAssignIndex[fi] < 0) {
+            continue;
+        }
+        const int nf = assignment[static_cast<size_t>(faceBeadAssignIndex[fi])];
         fb.face = nf;
         fb.phiCycle = newLoop->faces[static_cast<size_t>(nf)];
         fb.vertexBeads.clear();
@@ -461,8 +477,34 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
         fb.cachedExcessArea = 0.0;
     }
 
-    if (newExteriorFace != nullptr) {
-        *newExteriorFace = assignment.back();
+    if (newExteriorFaces != nullptr) {
+        newExteriorFaces->clear();
+        size_t k = 0;
+        for (const int of : oldExteriorFaces) {
+            if (of < 0) {
+                newExteriorFaces->push_back(-1);
+                continue;
+            }
+            newExteriorFaces->push_back(assignment[exteriorStart + k]);
+            ++k;
+        }
     }
     return newLoop;
+}
+
+std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
+                                      const R3FaceInfo& info, const int meeting[3],
+                                      int oldExteriorFace, int* newExteriorFace)
+{
+    std::vector<int> olds;
+    if (oldExteriorFace >= 0) {
+        olds.push_back(oldExteriorFace);
+    }
+    std::vector<int> news;
+    std::unique_ptr<Multiloop> result =
+        FinalizeR3(oldLoop, neck, info, meeting, olds, &news);
+    if (newExteriorFace != nullptr) {
+        *newExteriorFace = news.empty() ? -1 : news.front();
+    }
+    return result;
 }

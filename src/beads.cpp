@@ -2,6 +2,7 @@
 
 #include "geometry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <stdexcept>
@@ -48,11 +49,14 @@ namespace
         std::vector<BeadPos> samples;
         size_t seg = 0;
         for (int s = 1; s < total; ++s) {
-            while (s > cumulative[seg + 1]) {
+            while (seg + 1 < cumulative.size() && s > cumulative[seg + 1]) {
                 ++seg;
             }
-            const float frac = static_cast<float>(s - cumulative[seg]) /
-                               static_cast<float>(cumulative[seg + 1] - cumulative[seg]);
+            const int span = cumulative[seg + 1] - cumulative[seg];
+            if (span <= 0) {
+                continue;
+            }
+            const float frac = static_cast<float>(s - cumulative[seg]) / static_cast<float>(span);
             const GridPoint& a = path[seg];
             const GridPoint& b = path[seg + 1];
             samples.push_back({a.x + (b.x - a.x) * frac, a.y + (b.y - a.y) * frac});
@@ -63,7 +67,10 @@ namespace
 
 int Necklace::NeighborToward(int vertexBead, int halfEdge) const
 {
-    const Bead& bead = beads[vertexBead];
+    if (vertexBead < 0 || vertexBead >= static_cast<int>(beads.size())) {
+        return -1;
+    }
+    const Bead& bead = beads[static_cast<size_t>(vertexBead)];
     for (size_t i = 0; i < bead.sigmaCycle.size(); ++i) {
         if (bead.sigmaCycle[i] == halfEdge) {
             return bead.neighborOfHalfEdge[i];
@@ -124,10 +131,14 @@ void WalkFaceBoundaryFromPhiCycle(const std::vector<int>& phiCycle, const Neckla
     const int limit = static_cast<int>(neck.beads.size()) + 8;
     for (const int h : phiCycle) {
         const auto it = crossingOf.find(h);
-        if (it == crossingOf.end()) {
+        if (it == crossingOf.end() || it->second < 0 ||
+            it->second >= static_cast<int>(neck.crossingBead.size())) {
             continue;
         }
         const int tail = neck.crossingBead[static_cast<size_t>(it->second)];
+        if (tail < 0 || tail >= static_cast<int>(neck.beads.size())) {
+            continue;
+        }
         append(tail);
 
         int prev = tail;
@@ -205,6 +216,14 @@ double FaceBead::IsoperimetricRatio(const Necklace& neck) const
 
 Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout, int exteriorFace)
 {
+    std::unordered_set<int> exteriors;
+    exteriors.insert(exteriorFace);
+    return BuildNecklace(loop, layout, exteriors);
+}
+
+Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout,
+                       const std::unordered_set<int>& exteriorFaces)
+{
     Necklace necklace;
     necklace.radius = 0.25f;
 
@@ -242,6 +261,7 @@ Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout, int exte
         return bead.neighborOfHalfEdge[0];
     };
     for (int k = 1; k <= loop.numEdges; ++k) {
+        Require(k - 1 < static_cast<int>(layout.edgePaths.size()), "missing edge path");
         const std::vector<BeadPos> samples = SamplePathEveryHalfUnit(layout.edgePaths[k - 1]);
         Require(!samples.empty(), "edge with no room for beads");
         const int vbStart = necklace.crossingBead[crossingOf[k]];
@@ -270,7 +290,7 @@ Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout, int exte
     // corner of the face boundary, nudged inward by one radius diagonally.
     int label = 1;
     for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {
-        if (f == exteriorFace) {
+        if (exteriorFaces.count(f) != 0) {
             continue;
         }
         FaceBead faceBead;
@@ -293,4 +313,103 @@ Necklace BuildNecklace(const Multiloop& loop, const GridLayout& layout, int exte
     }
 
     return necklace;
+}
+
+void AppendCircleToNecklace(Necklace& necklace, BeadPos origin, int label, int strand)
+{
+    const BeadPos positions[8] = {
+        {0.0f, 0.0f}, {0.5f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.5f},
+        {1.0f, 1.0f}, {0.5f, 1.0f}, {0.0f, 1.0f}, {0.0f, 0.5f},
+    };
+    const int first = static_cast<int>(necklace.beads.size());
+    for (int i = 0; i < 8; ++i) {
+        Bead bead;
+        bead.isVertex = false;
+        bead.edge = 0;
+        bead.strand = strand;
+        bead.pos = {origin.x + positions[i].x, origin.y + positions[i].y};
+        bead.neighbors[0] = first + ((i + 7) % 8);
+        bead.neighbors[1] = first + ((i + 1) % 8);
+        necklace.beads.push_back(std::move(bead));
+    }
+    FaceBead faceBead;
+    faceBead.label = label;
+    faceBead.face = -1;
+    faceBead.pos = {origin.x + 0.5f, origin.y + 0.5f};
+    for (int i = 0; i < 8; ++i) {
+        faceBead.boundaryBeads.push_back(first + i);
+    }
+    necklace.faceBeads.push_back(std::move(faceBead));
+}
+
+Necklace BuildPackedNecklace(const Multiloop& loop, const PackedGridLayout& packed,
+                             const std::vector<MultiloopComponent>& components)
+{
+    std::unordered_set<int> exteriors;
+    for (const MultiloopComponent& component : components) {
+        if (component.kind == MultiloopPart::Crossings && component.exteriorFace >= 0) {
+            exteriors.insert(component.exteriorFace);
+        }
+    }
+
+    Necklace necklace;
+    if (loop.numEdges > 0) {
+        necklace = BuildNecklace(loop, packed.layout, exteriors);
+    }
+    else {
+        necklace.radius = 0.25f;
+    }
+
+    int nextLabel = 1;
+    for (const FaceBead& fb : necklace.faceBeads) {
+        nextLabel = std::max(nextLabel, fb.label + 1);
+    }
+    int nextStrand = loop.numStrands;
+    for (size_t i = 0; i < components.size(); ++i) {
+        if (components[i].kind != MultiloopPart::Circle) {
+            continue;
+        }
+        const GridPoint origin =
+            (i < packed.componentOrigin.size()) ? packed.componentOrigin[i] : GridPoint{};
+        const int strand =
+            (components[i].strand >= 0) ? components[i].strand : nextStrand++;
+        AppendCircleToNecklace(necklace, {static_cast<float>(origin.x), static_cast<float>(origin.y)},
+                               nextLabel++, strand);
+    }
+    return necklace;
+}
+
+Necklace BuildUnknotNecklace()
+{
+    Necklace necklace;
+    necklace.radius = 0.25f;
+    const BeadPos positions[8] = {
+        {0.0f, 0.0f}, {0.5f, 0.0f}, {1.0f, 0.0f}, {1.0f, 0.5f},
+        {1.0f, 1.0f}, {0.5f, 1.0f}, {0.0f, 1.0f}, {0.0f, 0.5f},
+    };
+    for (int i = 0; i < 8; ++i) {
+        Bead bead;
+        bead.isVertex = false;
+        bead.edge = 1;
+        bead.strand = 0;
+        bead.pos = positions[i];
+        bead.neighbors[0] = (i + 7) % 8;
+        bead.neighbors[1] = (i + 1) % 8;
+        necklace.beads.push_back(std::move(bead));
+    }
+    FaceBead faceBead;
+    faceBead.label = 1;
+    faceBead.face = 0;
+    faceBead.phiCycle = {1};
+    faceBead.pos = {0.5f, 0.5f};
+    necklace.faceBeads.push_back(std::move(faceBead));
+    return necklace;
+}
+
+GridLayout UnknotGridLayout()
+{
+    GridLayout layout;
+    layout.width = 1;
+    layout.height = 1;
+    return layout;
 }
