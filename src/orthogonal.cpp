@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdlib>
 #include <deque>
 #include <functional>
@@ -904,14 +905,7 @@ double GridFaceArea(const Multiloop& loop, const GridLayout& layout, int face)
 
 namespace
 {
-    constexpr int kPackGap = 2;
-
-    GridPoint OffsetPoint(GridPoint p, int dx, int dy)
-    {
-        p.x += dx;
-        p.y += dy;
-        return p;
-    }
+    constexpr float kPackGap = 0.5f;
 
     int LocalExteriorFace(const Multiloop& globalLoop, const Multiloop& localLoop,
                           const DenseRelabel& relabel, const MultiloopComponent& component)
@@ -971,7 +965,7 @@ PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
         }
     }
 
-    int cursor = 0;
+    float cursor = 0.0f;
     int maxHeight = 0;
     for (size_t i = 0; i < components.size(); ++i) {
         if (i > 0) {
@@ -981,7 +975,7 @@ PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
         int width = 1;
         int height = 1;
         if (component.kind == MultiloopPart::Circle) {
-            packed.componentOrigin[i] = {cursor, 0};
+            packed.componentOrigin[i] = {cursor, 0.0f};
         }
         else {
             const DenseRelabel relabel = RelabelComponent(loop.sigma, component.halfEdges);
@@ -993,7 +987,9 @@ PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
             GridLayout local = ComputeGridLayout(localLoop, localExterior);
             width = local.width;
             height = local.height;
-            packed.componentOrigin[i] = {cursor, 0};
+            packed.componentOrigin[i] = {cursor, 0.0f};
+            // Keep Tamassia paths in local integer coords. The float pack
+            // origin is applied when beads are placed (BuildPackedNecklace).
             for (int k = 1; k <= localLoop.numEdges; ++k) {
                 const auto git = relabel.localToGlobal.find(k);
                 if (git == relabel.localToGlobal.end()) {
@@ -1003,11 +999,8 @@ PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
                 if (globalK < 1 || globalK > loop.numEdges) {
                     continue;
                 }
-                std::vector<GridPoint> path = local.edgePaths[static_cast<size_t>(k - 1)];
-                for (GridPoint& p : path) {
-                    p = OffsetPoint(p, cursor, 0);
-                }
-                packed.layout.edgePaths[static_cast<size_t>(globalK - 1)] = std::move(path);
+                packed.layout.edgePaths[static_cast<size_t>(globalK - 1)] =
+                    local.edgePaths[static_cast<size_t>(k - 1)];
             }
             const std::vector<std::vector<int>> localCycles = localLoop.sigma.Cycles();
             for (int lc = 0; lc < static_cast<int>(localCycles.size()); ++lc) {
@@ -1024,16 +1017,16 @@ PackedGridLayout ComputePackedGridLayout(const Multiloop& loop,
                     continue;
                 }
                 packed.layout.crossingPositions[static_cast<size_t>(cit->second)] =
-                    OffsetPoint(local.crossingPositions[static_cast<size_t>(lc)], cursor, 0);
+                    local.crossingPositions[static_cast<size_t>(lc)];
             }
         }
         packed.componentWidth[i] = width;
         packed.componentHeight[i] = height;
-        cursor += width;
+        cursor += static_cast<float>(width);
         maxHeight = std::max(maxHeight, height);
     }
 
-    packed.layout.width = (components.empty()) ? 0 : cursor;
+    packed.layout.width = (components.empty()) ? 0 : static_cast<int>(std::ceil(cursor));
     packed.layout.height = maxHeight;
     return packed;
 }

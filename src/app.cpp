@@ -23,6 +23,9 @@
 #include "physics.h"
 #include "physics_params.h"
 #include "physics_tuning.h"
+#include "move_rewrite.h"
+#include "r1_move.h"
+#include "r2_move.h"
 #include "r3_move.h"
 #include "random_multiloop.h"
 
@@ -642,6 +645,7 @@ namespace
             viewAnimating = false;
             try {
                 physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
+                physics->SetNesting(components);
             }
             catch (const std::exception& e) {
                 physics.reset();
@@ -733,6 +737,8 @@ namespace
             necklace.reset();
             physics.reset();
             error.clear();
+            // Packing side by side un-nests every component.
+            ClearNesting(components);
             try {
                 const Permutation empty;
                 const Multiloop dummy(empty);
@@ -958,6 +964,12 @@ namespace
             }
             physics->EnsureR3ExteriorHoneycombMins(*newLoop);
             physics.reset();
+            // Nesting parents follow their faces (labels are unchanged by R3).
+            for (MultiloopComponent& component : components) {
+                if (component.parentFace >= 0) {
+                    component.parentFace = RemapFaceByOverlap(*loop, *newLoop, component.parentFace);
+                }
+            }
             loop = std::move(newLoop);
             debugFaceBeadIndex = -1;
             {
@@ -985,12 +997,134 @@ namespace
             SyncSigmaText();
             try {
                 physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
-                physics->StartR3PostRepair();
+                physics->SetNesting(components);
+                physics->StartPostRepair();
             }
             catch (const std::exception& e) {
                 physics.reset();
                 error = e.what();
             }
+        }
+
+        // True when some component sits inside `face` (a region with holes).
+        bool FaceHasNested(int face) const
+        {
+            if (face < 0) {
+                return false;
+            }
+            for (const MultiloopComponent& component : components) {
+                if (component.parentFace == face) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Face of `newLoop` sharing the most half-edges with `oldFace` of
+        // `oldLoop` (labels unchanged, as after an R3). -1 if none.
+        static int RemapFaceByOverlap(const Multiloop& oldLoop, const Multiloop& newLoop,
+                                      int oldFace)
+        {
+            if (oldFace < 0 || oldFace >= static_cast<int>(oldLoop.faces.size())) {
+                return -1;
+            }
+            const std::vector<int>& cycle = oldLoop.faces[static_cast<size_t>(oldFace)];
+            int best = -1;
+            size_t bestOverlap = 0;
+            for (size_t f = 0; f < newLoop.faces.size(); ++f) {
+                size_t overlap = 0;
+                for (const int h : newLoop.faces[f]) {
+                    if (std::find(cycle.begin(), cycle.end(), h) != cycle.end()) {
+                        ++overlap;
+                    }
+                }
+                if (overlap > bestOverlap) {
+                    bestOverlap = overlap;
+                    best = static_cast<int>(f);
+                }
+            }
+            return best;
+        }
+
+        // Shared tail of CompleteR1Move / CompleteR2Move: the necklace has been
+        // rewired and `result` carries the new component list.
+        void CompleteShorteningMove(std::unique_ptr<Multiloop> newLoop,
+                                    const MoveComponentResult& result)
+        {
+            physics->EnsureExteriorHoneycombMins(*newLoop, result.exteriorArcs);
+            physics.reset();
+            int newSelected = -1;
+            if (selectedFace >= 0 && selectedFace < static_cast<int>(result.faceMap.size())) {
+                newSelected = result.faceMap[static_cast<size_t>(selectedFace)];
+            }
+            loop = std::move(newLoop);
+            components = result.components;
+            debugFaceBeadIndex = -1;
+            if (newSelected < 0) {
+                for (const MultiloopComponent& component : components) {
+                    if (component.kind == MultiloopPart::Crossings && component.exteriorFace >= 0) {
+                        newSelected = component.exteriorFace;
+                        break;
+                    }
+                }
+            }
+            if (newSelected >= static_cast<int>(loop->faces.size())) {
+                newSelected = -1;
+            }
+            selectedFace = newSelected;
+            faceLabels.clear();
+            for (const std::vector<int>& face : loop->faces) {
+                faceLabels.push_back(CycleToString(face));
+            }
+            SyncSigmaText();
+            try {
+                // With no crossings left this is the all-circles multiloop; the
+                // necklace stays where it is (Reset packs side by side).
+                physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
+                physics->SetNesting(components);
+                if (result.mergeKeepLabel >= 0 && result.mergeDropLabel >= 0) {
+                    physics->SetFaceMergePair(result.mergeKeepLabel, result.mergeDropLabel);
+                }
+                physics->StartPostRepair();
+            }
+            catch (const std::exception& e) {
+                physics.reset();
+                error = e.what();
+            }
+        }
+
+        void CompleteR1Move()
+        {
+            if (!physics || !loop || !necklace) {
+                return;
+            }
+            R1FaceInfo info;
+            physics->GetR1Result(&info);
+            MoveComponentResult result;
+            std::unique_ptr<Multiloop> newLoop =
+                FinalizeR1(*loop, *necklace, info, components, &result);
+            if (!newLoop) {
+                physics->CancelMove();
+                return;
+            }
+            CompleteShorteningMove(std::move(newLoop), result);
+        }
+
+        void CompleteR2Move()
+        {
+            if (!physics || !loop || !necklace) {
+                return;
+            }
+            R2FaceInfo info;
+            physics->GetR2Result(&info);
+            MoveComponentResult result;
+            std::unique_ptr<Multiloop> newLoop =
+                FinalizeR2(*loop, *necklace, info, components, &result);
+            if (!newLoop) {
+                physics->CancelMove();
+                return;
+            }
+            CompleteShorteningMove(std::move(newLoop), result);
         }
 
         void SelectFaceContaining(int halfEdge)
@@ -2085,7 +2219,7 @@ namespace
             if (fitEnabled && click && CheckCollisionPointRec(mouse, fitR)) {
                 BeginViewFit(app, canvas);
             }
-            const std::string undoLabel = "Undo R3";
+            const std::string undoLabel = "Undo move";
             const float undoW = TextWidth(undoLabel, 18.0f) + 24.0f;
             const float undoX = fitX + fitW + 8.0f;
             const Rectangle undoR = {undoX, row3, undoW, 30.0f};
@@ -2205,15 +2339,26 @@ namespace
                                 app.debugFaceBeadIndex = clickedFaceBead;
                                 app.physics->PrintShoelaceDebug(fb.face);
                             }
-                            // A click on a degree-3 region starts the
-                            // Reidemeister 3 slide.
-                            if (fb.phiCycle.size() == 3 && !app.physics->AutoTightening() &&
-                                !app.physics->R3Active()) {
+                            // A click on a 1-, 2- or 3-gon region starts the
+                            // matching Reidemeister move (regions holding
+                            // nested components are left alone).
+                            const size_t degree = fb.phiCycle.size();
+                            if (fb.face >= 0 && degree >= 1 && degree <= 3 &&
+                                !app.unknotMode && !app.physics->AutoTightening() &&
+                                !app.physics->MoveActive() && !app.FaceHasNested(fb.face)) {
                                 app.PushR3Undo();
-                                if (!app.physics->StartR3Move(fb.face)) {
-                                    if (!app.r3Undo.empty()) {
-                                        app.r3Undo.pop_back();
-                                    }
+                                bool started = false;
+                                if (degree == 1) {
+                                    started = app.physics->StartR1Move(fb.face);
+                                }
+                                else if (degree == 2) {
+                                    started = app.physics->StartR2Move(fb.face);
+                                }
+                                else {
+                                    started = app.physics->StartR3Move(fb.face);
+                                }
+                                if (!started && !app.r3Undo.empty()) {
+                                    app.r3Undo.pop_back();
                                 }
                             }
                         }
@@ -2225,9 +2370,15 @@ namespace
                     app.physics->ResetDebugTimings();
                 }
                 const auto physicsT0 = std::chrono::high_resolution_clock::now();
-                if (app.physics->R3Active()) {
-                    app.physics->R3Step();
-                    if (app.physics->R3Complete()) {
+                if (app.physics->MoveActive()) {
+                    app.physics->MoveStep();
+                    if (app.physics->R1Complete()) {
+                        app.CompleteR1Move();
+                    }
+                    else if (app.physics->R2Complete()) {
+                        app.CompleteR2Move();
+                    }
+                    else if (app.physics->R3Complete()) {
                         app.CompleteR3Move();
                     }
                 }
@@ -2235,10 +2386,10 @@ namespace
                     app.physics->AutoStep();
                 }
                 else if (app.physics) {
-                    app.physics->Step();
+                    app.physics->IdleStep();
                 }
                 const bool autoNow = app.physics && app.physics->AutoTightening();
-                const bool r3Now = app.physics && app.physics->R3Active();
+                const bool r3Now = app.physics && app.physics->MoveActive();
                 if ((app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now)) {
                     BeginViewFit(app, canvas);
                     if (app.physics) {

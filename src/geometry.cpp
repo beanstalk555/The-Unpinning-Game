@@ -69,8 +69,7 @@ namespace
         return qx * qx + qy * qy;
     }
 
-    // Positive inside, negative outside; magnitude is distance to the boundary.
-    double SignedBoundaryDist(const Vec2d& p, const std::vector<Vec2d>& poly)
+    double MinDistSqToRing(const Vec2d& p, const std::vector<Vec2d>& poly)
     {
         const int n = static_cast<int>(poly.size());
         double minSq = 1e300;
@@ -78,8 +77,22 @@ namespace
             minSq = std::min(minSq, DistToSegmentSq(p, poly[static_cast<size_t>(i)],
                                                     poly[static_cast<size_t>((i + 1) % n)]));
         }
+        return minSq;
+    }
+
+    // Positive inside (outer and outside every hole), negative otherwise;
+    // magnitude is distance to the nearest ring.
+    double SignedBoundaryDist(const Vec2d& p, const std::vector<Vec2d>& outer,
+                              const std::vector<std::vector<Vec2d>>& holes)
+    {
+        double minSq = MinDistSqToRing(p, outer);
+        for (const std::vector<Vec2d>& hole : holes) {
+            if (hole.size() >= 3) {
+                minSq = std::min(minSq, MinDistSqToRing(p, hole));
+            }
+        }
         const double d = std::sqrt(minSq);
-        return PointInPolygon(p, poly) ? d : -d;
+        return PointInPolygonWithHoles(p, outer, holes) ? d : -d;
     }
 
     struct PolyCell
@@ -96,19 +109,41 @@ namespace
         bool operator()(const PolyCell& a, const PolyCell& b) const { return a.max < b.max; }
     };
 
-    PolyCell MakeCell(double x, double y, double h, const std::vector<Vec2d>& poly)
+    PolyCell MakeCell(double x, double y, double h, const std::vector<Vec2d>& poly,
+                      const std::vector<std::vector<Vec2d>>& holes)
     {
         PolyCell c;
         c.x = x;
         c.y = y;
         c.h = h;
-        c.d = SignedBoundaryDist(Vec2d{x, y}, poly);
+        c.d = SignedBoundaryDist(Vec2d{x, y}, poly, holes);
         c.max = c.d + h * 1.4142135623730951;
         return c;
     }
 }
 
+bool PointInPolygonWithHoles(const Vec2d& point, const std::vector<Vec2d>& outer,
+                             const std::vector<std::vector<Vec2d>>& holes)
+{
+    if (!PointInPolygon(point, outer)) {
+        return false;
+    }
+    for (const std::vector<Vec2d>& hole : holes) {
+        if (hole.size() >= 3 && PointInPolygon(point, hole)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices, double precision)
+{
+    return LargestInscribedCircle(vertices, {}, precision);
+}
+
+InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices,
+                                       const std::vector<std::vector<Vec2d>>& holes,
+                                       double precision)
 {
     InscribedCircle result;
     const int n = static_cast<int>(vertices.size());
@@ -142,19 +177,24 @@ InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices, doubl
         precision = std::max(1e-4, 0.01 * cellSize0);
     }
 
-    PolyCell best = MakeCell(cx, cy, 0.0, vertices);
+    PolyCell best = MakeCell(cx, cy, 0.0, vertices, holes);
     const PolyCell bboxMid =
-        MakeCell(minX + width * 0.5, minY + height * 0.5, 0.0, vertices);
+        MakeCell(minX + width * 0.5, minY + height * 0.5, 0.0, vertices, holes);
     if (bboxMid.d > best.d) {
         best = bboxMid;
     }
 
     std::priority_queue<PolyCell, std::vector<PolyCell>, PolyCellBetter> queue;
+    // With holes the seed grid must be fine enough to land cells in the
+    // annular region; a hole can swallow the single coarse cell.
     double cellSize = cellSize0;
+    if (!holes.empty()) {
+        cellSize = cellSize0 / 4.0;
+    }
     double h = cellSize / 2.0;
     for (double x = minX; x < maxX; x += cellSize) {
         for (double y = minY; y < maxY; y += cellSize) {
-            queue.push(MakeCell(x + h, y + h, h, vertices));
+            queue.push(MakeCell(x + h, y + h, h, vertices, holes));
         }
     }
 
@@ -172,10 +212,10 @@ InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices, doubl
             break;
         }
         h = cell.h / 2.0;
-        queue.push(MakeCell(cell.x - h, cell.y - h, h, vertices));
-        queue.push(MakeCell(cell.x + h, cell.y - h, h, vertices));
-        queue.push(MakeCell(cell.x - h, cell.y + h, h, vertices));
-        queue.push(MakeCell(cell.x + h, cell.y + h, h, vertices));
+        queue.push(MakeCell(cell.x - h, cell.y - h, h, vertices, holes));
+        queue.push(MakeCell(cell.x + h, cell.y - h, h, vertices, holes));
+        queue.push(MakeCell(cell.x - h, cell.y + h, h, vertices, holes));
+        queue.push(MakeCell(cell.x + h, cell.y + h, h, vertices, holes));
     }
 
     if (best.d > 0.0) {

@@ -58,6 +58,9 @@ struct FaceBead
     mutable std::vector<int> boundaryBeads;
     // Dot product of unit vectors to prev/next boundary beads (interior angle).
     mutable std::vector<float> boundaryDots;
+    // Exterior rings of components nested inside this region (refreshed by
+    // Physics from the component nesting). Empty for simple faces.
+    mutable std::vector<std::vector<int>> holeBeads;
     // Excess area at the last structure rebuild (topology-fresh positions).
     double cachedExcessArea = 0.0;
 

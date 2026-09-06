@@ -218,6 +218,44 @@ DenseRelabel RelabelComponent(const Permutation& sigma, const std::vector<int>& 
     return relabel;
 }
 
+std::vector<int> CollectSigmaComponent(const Permutation& sigma, int start)
+{
+    std::set<int> seen;
+    return CollectComponent(sigma, start, seen);
+}
+
+void AssignCircleStrands(const Multiloop& loop, std::vector<MultiloopComponent>& components)
+{
+    // Mirror BuildPackedNecklace: sequential from loop.numStrands, but never
+    // collide with a circle that already carries an id.
+    int cursor = loop.numStrands;
+    for (MultiloopComponent& component : components) {
+        if (component.kind != MultiloopPart::Circle || component.strand >= 0) {
+            continue;
+        }
+        bool taken = true;
+        while (taken) {
+            taken = false;
+            for (const MultiloopComponent& other : components) {
+                if (other.kind == MultiloopPart::Circle && other.strand == cursor) {
+                    taken = true;
+                    ++cursor;
+                    break;
+                }
+            }
+        }
+        component.strand = cursor++;
+    }
+}
+
+void ClearNesting(std::vector<MultiloopComponent>& components)
+{
+    for (MultiloopComponent& component : components) {
+        component.parentFace = -1;
+        component.parentCircle = -1;
+    }
+}
+
 int FaceIndexContainingHalfEdge(const Multiloop& loop, int halfEdge)
 {
     for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {

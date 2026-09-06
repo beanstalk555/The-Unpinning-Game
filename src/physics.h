@@ -11,6 +11,8 @@
 #include "beads.h"
 #include "multiloop.h"
 #include "physics_params.h"
+#include "r1_move.h"
+#include "r2_move.h"
 #include "r3_move.h"
 #include "spatial_disk_grid.h"
 #include "geometry.h"
@@ -55,6 +57,12 @@ public:
 
     // Advance the simulation by one displayed frame.
     void Step();
+
+    // Step() for the resting state: additionally sheds one excess bead from a
+    // monogon (down to 5 beads) or a circle (down to 6) every
+    // params.passiveTightenInterval frames. No-op while a move, auto-tighten
+    // or drag is in progress.
+    void IdleStep();
 
     // Diagram tension, cached from the most recent Step()/AutoStep().
     // Stretch and compression are averaged over non-removed necklace beads.
@@ -103,9 +111,44 @@ public:
     // After FinalizeR3: top up exterior arcs sa–sf so monogons have ≥5 edge
     // beads and bigons have ≥2. Uses newLoop for topology; edits neck_.
     void EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop);
-    // After FinalizeR3 + a new Physics on the rewritten loop: fill oversized
-    // gaps, then strip sharp bends without breaking honeycomb faces.
-    void StartR3PostRepair();
+    // Same for an explicit list of (new) edge labels, e.g. the exterior arcs
+    // returned by FinishMoveBookkeeping after an R1/R2.
+    void EnsureExteriorHoneycombMins(const Multiloop& newLoop, const std::vector<int>& edges);
+    // After a finalized move + a new Physics on the rewritten loop: fill
+    // oversized gaps, then strip sharp bends without breaking honeycomb faces.
+    void StartPostRepair();
+    void StartR3PostRepair() { StartPostRepair(); }
+
+    // ---- Reidemeister 1 / 2 (shortening) ----
+    // R1: erases the monogon's face bead, strips the loop to two edge beads.
+    bool StartR1Move(int face);
+    bool R1Active() const { return r1Active_; }
+    bool R1Complete() const { return r1Complete_; }
+    void GetR1Result(R1FaceInfo* info) const;
+    // R2: erases the bigon's face bead, strips each side to one bead while
+    // padding tense exterior arcs, then pulls X and Y tangent with a spoke.
+    bool StartR2Move(int face);
+    bool R2Active() const { return r2Active_; }
+    bool R2Complete() const { return r2Complete_; }
+    void GetR2Result(R2FaceInfo* info) const;
+
+    // Any Reidemeister animation (R1, R2, R3 or post-repair) in progress.
+    bool MoveActive() const { return r1Active_ || r2Active_ || r3Active_; }
+    bool MoveComplete() const { return r1Complete_ || r2Complete_ || r3Complete_; }
+    // Advance whichever move is active by one displayed frame.
+    void MoveStep();
+    // Abandon the active move (restores cuts and the erased face bead).
+    void CancelMove();
+
+    // ---- nesting (faces with holes) ----
+    // Records which components sit inside which face / circle. Call right
+    // after construction; hole rings are resolved on each structure rebuild.
+    void SetNesting(const std::vector<MultiloopComponent>& components);
+    bool FaceHasHoles(int face) const;
+    // Two face beads share a merged face: pull both to its incenter and erase
+    // the one labelled `dropLabel` once they overlap.
+    void SetFaceMergePair(int keepLabel, int dropLabel);
+    bool FaceMergePending() const { return mergeKeepLabel_ >= 0; }
 
     // Number of 1-/2-/3-gons currently held by a 6-spoke honeycomb truss.
     int HoneycombFortifyCount() const { return static_cast<int>(honeycombFaceFi_.size()); }
@@ -115,6 +158,13 @@ public:
 
     // True when the face bead's center is inside its face polygon (even-odd raycast).
     bool FaceBeadInsideFace(const FaceBead& fb) const;
+
+    // Boundary polygon for this face bead. Combinatorial faces (face >= 0)
+    // use the phi walk; packed circle pads (face < 0) use that bead's ring.
+    bool FaceBeadBoundaryPolygon(const FaceBead& fb, std::vector<Vec2d>* out) const;
+    // Same, also returning the rings of nested components (holes).
+    bool FaceBeadBoundaryPolygon(const FaceBead& fb, std::vector<Vec2d>* out,
+                                 std::vector<std::vector<Vec2d>>* holes) const;
 
     // Same, looked up by combinatorial face index. Exterior face is infinite.
     double ExcessArea(int face) const;
@@ -241,6 +291,7 @@ private:
         int removedBead = -1;
         int neighborA = -1;
         int neighborC = -1;
+        int faceBead = -1; // circle-ring settle; edge == 0
     };
     std::vector<PendingEdge> pendingEdges_;
     std::vector<bool> struckEdges_;
@@ -300,7 +351,11 @@ private:
     float EdgeChainLength(int edge) const;
     int InsertBeadAtFarthestGap(int edge);
     int RemoveFarthestFromFaceCenter(int edge, int face);
+    int RemoveFarthestFromPoint(int edge, Vector2 center);
     bool R3SettleTick(int edge, float lengthAtStart);
+    // Insert beads next to vertexBead along halfEdge until the edge has at
+    // least minInteriors interior beads.
+    bool PadEdgeToward(int vertexBead, int halfEdge, int minInteriors);
     // True when removing from edge would strip a neighbor face that is already
     // at the honeycomb floor (≤6 boundary beads). The clicked R3 face is ignored.
     bool NeighborHoneycombBlocksRemoval(int edge);
@@ -308,15 +363,86 @@ private:
     bool InsertLargestGapIfNeeded();
     bool RemoveSharpBendIfAllowed();
     bool RemoveMonogonExcessIfAllowed();
+    bool IsCircleFaceBead(const FaceBead& fb) const;
+    // Removes one bead from every circle above its floor (or from just the
+    // first such circle when oneBead is set).
+    bool RemoveCircleExcessIfAllowed(bool oneBead = false);
+    // One passive-tightening removal (monogon first, then circle).
+    bool PassiveTightenOnce();
+    int idleFrames_ = 0;
+    void RefreshCircleStructures();
+    void QueueCircleSettlePendings();
+    int LiveBoundaryCount(const FaceBead& fb) const;
+    int FarthestLiveBoundaryBead(const FaceBead& fb) const;
+    void RefreshCircleBoundary(FaceBead& fb);
+    double CircleRingTension(const FaceBead& fb) const;
+    double PendingTension(const PendingEdge& pending) const;
     void RebuildHoneycombSpokes();
     bool FaceHasHoneycombSpokes(int fi) const;
     int HoneycombSlotForFace(int face) const;
     void R3PostRepairStep();
     void ClearR3State();
-    void RebuildR3CycleSideBeads();
+    void RebuildMoveRepelSides();
     bool FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const;
-    void CollectR3InvolvedFaces(std::unordered_set<int>* out) const;
+    void CollectMoveInvolvedFaces(std::unordered_set<int>* out) const;
     bool DetectTangle() const;
+
+    // ---- shortening (R1 / R2) helpers ----
+    enum class ShortenSub
+    {
+        NeedRemove,
+        SettlingRemove,
+        NeedInsert,
+        SettlingInsert,
+        Spoke
+    };
+    void ShortenStep();
+    void CancelShorten();
+    Vector2 ShortenCenter() const;
+    bool EraseFaceBead(int face);
+    void RestoreErasedFaceBead();
+    void TryFaceMerge();
+    void ResolveHoles();
+    int PadStrand(const FaceBead& fb) const;
+    std::vector<int> RingBeadsOfCircleStrand(int strand) const;
+    double HoleArea(const FaceBead& fb) const;
+    // Minimum boundary bead count of a region with holes (0 without holes).
+    int HoleFloor(const FaceBead& fb) const;
+
+    bool r1Active_ = false;
+    bool r1Complete_ = false;
+    bool r2Active_ = false;
+    bool r2Complete_ = false;
+    R1FaceInfo r1Info_;
+    R2FaceInfo r2Info_;
+    ShortenSub shortenSub_ = ShortenSub::NeedRemove;
+    std::vector<int> shortenStripEdges_;
+    std::vector<int> shortenStripTarget_;
+    std::vector<int> shortenPadEdges_;
+    int shortenStallFrames_ = 0;
+    int spokeFrames_ = 0;
+    bool r2DidExteriorPad_ = false;
+    bool erasedFaceBeadValid_ = false;
+    FaceBead erasedFaceBead_;
+    size_t erasedFaceBeadIndex_ = 0;
+    // Interiors of the sides that repel each other during a move (R3 triangle
+    // sides, R2 bigon sides).
+    std::vector<std::vector<int>> moveRepelSides_;
+
+    // Pending face-bead merge (connected R2).
+    int mergeKeepLabel_ = -1;
+    int mergeDropLabel_ = -1;
+    int mergeFrames_ = 0;
+
+    // Nesting: one entry per nested component.
+    struct NestingHole
+    {
+        int parentFace = -1;
+        int parentCircle = -1;
+        int holeFace = -1;   // exterior face of a nested crossing component
+        int holeCircle = -1; // strand of a nested circle
+    };
+    std::vector<NestingHole> nesting_;
 
     bool r3Active_ = false;
     bool r3Complete_ = false;
@@ -331,8 +457,6 @@ private:
     std::vector<std::pair<int, int>> r3CutEdges_; // (edge label, terminal bead)
     // Unique exterior edge labels |a[i]|, |b[i]| (sa–sf, possibly fewer than 6).
     std::vector<int> r3ExteriorEdges_;
-    // Interior beads on each triangle side h[i] (vertices omitted).
-    std::vector<int> r3CycleSideBeads_[3];
     int r3SettleEdge_ = -1;
     float r3SettleLength_ = 0.0f;
     int r3SettleFrames_ = 0;

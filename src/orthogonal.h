@@ -33,12 +33,20 @@ struct GridLayout
 // orthogonal.py. Throws std::runtime_error on failure.
 GridLayout ComputeGridLayout(const Multiloop& loop, int exteriorFace);
 
+// Float origin for a packed component. GridPoint stays integer (Tamassia);
+// the pack cursor needs half-units so neighboring beads can sit one diameter apart.
+struct PackOrigin
+{
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
 // Per-component Tamassia drawings packed left to right. Circles occupy a
 // unit square; crossing components are relabeled and laid out separately.
 struct PackedGridLayout
 {
     GridLayout layout;
-    std::vector<GridPoint> componentOrigin;
+    std::vector<PackOrigin> componentOrigin;
     std::vector<int> componentWidth;
     std::vector<int> componentHeight;
 };

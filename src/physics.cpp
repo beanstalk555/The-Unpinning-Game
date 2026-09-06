@@ -2,6 +2,7 @@
 
 #include "drawing.h"
 #include "geometry.h"
+#include "move_rewrite.h"
 #include "permutation.h"
 
 #include <algorithm>
@@ -339,33 +340,165 @@ void Physics::RebuildFaceGeometry()
     exteriorBoundaries_.clear();
     exteriorFaceOrder_.clear();
     for (int f = 0; f < static_cast<int>(loop_->faces.size()); ++f) {
-        if (IsExterior(f)) {
-            std::vector<float> exteriorDots;
-            std::vector<int> boundary;
-            WalkFaceBoundaryFromPhiCycle(loop_->faces[f], *neck_, crossingOf_,
-                                         boundary, exteriorDots, &sharpSet,
-                                         sharpDotThreshold_);
-            exteriorFaceOrder_.push_back(f);
-            exteriorBoundaries_.push_back(std::move(boundary));
+        if (!IsExterior(f)) {
             continue;
         }
-        FaceBead* fb = FaceBeadFor(f);
-        if (fb == nullptr) {
-            continue;
-        }
-        WalkFaceBoundaryFromPhiCycle(loop_->faces[f], *neck_, crossingOf_,
-                                     fb->boundaryBeads, fb->boundaryDots, &sharpSet,
-                                     sharpDotThreshold_);
-        fb->cachedExcessArea = fb->ExcessArea(*neck_, radius_);
+        std::vector<float> exteriorDots;
+        std::vector<int> boundary;
+        WalkFaceBoundaryFromPhiCycle(loop_->faces[f], *neck_, crossingOf_, boundary,
+                                     exteriorDots, &sharpSet, sharpDotThreshold_);
+        exteriorFaceOrder_.push_back(f);
+        exteriorBoundaries_.push_back(std::move(boundary));
     }
+    // Every face bead walks its own boundary (a merged face may briefly hold
+    // two beads).
     for (FaceBead& fb : neck_->faceBeads) {
-        if (fb.face >= 0 || fb.boundaryBeads.size() < 3) {
+        if (fb.face < 0 || IsExterior(fb.face) ||
+            fb.face >= static_cast<int>(loop_->faces.size())) {
+            continue;
+        }
+        WalkFaceBoundaryFromPhiCycle(loop_->faces[static_cast<size_t>(fb.face)], *neck_,
+                                     crossingOf_, fb.boundaryBeads, fb.boundaryDots, &sharpSet,
+                                     sharpDotThreshold_);
+    }
+    ResolveHoles();
+    for (FaceBead& fb : neck_->faceBeads) {
+        if (fb.face >= 0) {
+            if (IsExterior(fb.face)) {
+                continue;
+            }
+            fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_) - HoleArea(fb);
+            continue;
+        }
+        if (fb.boundaryBeads.size() < 3) {
             continue;
         }
         fb.RefreshBoundaryDots(*neck_);
-        fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
+        fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_) - HoleArea(fb);
     }
     neck_->sharpCornerEdges.assign(sharpSet.begin(), sharpSet.end());
+}
+
+double Physics::HoleArea(const FaceBead& fb) const
+{
+    double area = 0.0;
+    for (const std::vector<int>& hole : fb.holeBeads) {
+        std::vector<Vec2d> poly;
+        poly.reserve(hole.size());
+        for (const int bead : hole) {
+            if (bead < 0 || bead >= BeadCount() ||
+                neck_->beads[static_cast<size_t>(bead)].removed) {
+                continue;
+            }
+            const Vector2 p = PosOf(bead);
+            poly.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+        }
+        area += ShoelaceArea(poly);
+    }
+    return area;
+}
+
+int Physics::PadStrand(const FaceBead& fb) const
+{
+    for (const int bead : fb.boundaryBeads) {
+        if (bead >= 0 && bead < BeadCount() && !neck_->beads[static_cast<size_t>(bead)].removed) {
+            return neck_->beads[static_cast<size_t>(bead)].strand;
+        }
+    }
+    return -1;
+}
+
+std::vector<int> Physics::RingBeadsOfCircleStrand(int strand) const
+{
+    for (const FaceBead& fb : neck_->faceBeads) {
+        if (IsCircleFaceBead(fb) && PadStrand(fb) == strand) {
+            return fb.boundaryBeads;
+        }
+    }
+    for (int i = 0; i < BeadCount(); ++i) {
+        const Bead& b = neck_->beads[static_cast<size_t>(i)];
+        if (!b.isVertex && !b.removed && b.edge == 0 && b.strand == strand) {
+            return CircleRingThrough(*neck_, i);
+        }
+    }
+    return {};
+}
+
+void Physics::ResolveHoles()
+{
+    for (FaceBead& fb : neck_->faceBeads) {
+        fb.holeBeads.clear();
+    }
+    if (nesting_.empty()) {
+        return;
+    }
+    for (const NestingHole& hole : nesting_) {
+        std::vector<int> ring;
+        if (hole.holeFace >= 0) {
+            const int slot = ExteriorSlot(hole.holeFace);
+            if (slot < 0) {
+                continue;
+            }
+            ring = exteriorBoundaries_[static_cast<size_t>(slot)];
+        }
+        else if (hole.holeCircle >= 0) {
+            ring = RingBeadsOfCircleStrand(hole.holeCircle);
+        }
+        ring.erase(std::remove_if(ring.begin(), ring.end(),
+                                  [&](int bead) {
+                                      return bead < 0 || bead >= BeadCount() ||
+                                             neck_->beads[static_cast<size_t>(bead)].removed;
+                                  }),
+                   ring.end());
+        if (ring.size() < 3) {
+            continue;
+        }
+        for (FaceBead& fb : neck_->faceBeads) {
+            const bool byFace = hole.parentFace >= 0 && fb.face == hole.parentFace;
+            const bool byCircle = hole.parentCircle >= 0 && IsCircleFaceBead(fb) &&
+                                  PadStrand(fb) == hole.parentCircle;
+            if (byFace || byCircle) {
+                fb.holeBeads.push_back(ring);
+            }
+        }
+    }
+}
+
+void Physics::SetNesting(const std::vector<MultiloopComponent>& components)
+{
+    nesting_.clear();
+    for (const MultiloopComponent& c : components) {
+        if (!c.Nested()) {
+            continue;
+        }
+        NestingHole hole;
+        hole.parentFace = c.parentFace;
+        hole.parentCircle = c.parentCircle;
+        if (c.kind == MultiloopPart::Crossings) {
+            hole.holeFace = c.exteriorFace;
+        }
+        else {
+            hole.holeCircle = c.strand;
+        }
+        if (hole.holeFace < 0 && hole.holeCircle < 0) {
+            continue;
+        }
+        nesting_.push_back(hole);
+    }
+    structureDirty_ = true;
+}
+
+bool Physics::FaceHasHoles(int face) const
+{
+    if (face < 0) {
+        return false;
+    }
+    for (const NestingHole& hole : nesting_) {
+        if (hole.parentFace == face) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void Physics::RebuildFaceBodiesFromCache()
@@ -378,6 +511,10 @@ void Physics::RebuildFaceBodiesFromCache()
         std::vector<int> bodies;
         bodies.push_back(BeadCount() + static_cast<int>(fi));
         bodies.insert(bodies.end(), fb.boundaryBeads.begin(), fb.boundaryBeads.end());
+        // Nested components collide with this region's bead and boundary.
+        for (const std::vector<int>& hole : fb.holeBeads) {
+            bodies.insert(bodies.end(), hole.begin(), hole.end());
+        }
         faceBodies_.push_back(std::move(bodies));
     }
     for (const std::vector<int>& boundary : exteriorBoundaries_) {
@@ -408,7 +545,10 @@ void Physics::RebuildHoneycombSpokes()
     const int n = BeadCount();
     for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
         const FaceBead& fb = neck_->faceBeads[fi];
-        if (fb.phiCycle.size() > 3 || fb.boundaryBeads.size() != 6) {
+        if (fb.phiCycle.size() > 3 || fb.boundaryBeads.size() != 6 || !fb.holeBeads.empty()) {
+            continue;
+        }
+        if (mergeKeepLabel_ >= 0 && (fb.label == mergeKeepLabel_ || fb.label == mergeDropLabel_)) {
             continue;
         }
         int spokes[6];
@@ -476,16 +616,23 @@ void Physics::WalkFaceBoundaryNoDots(int face)
                                      unusedDots, nullptr, 0.0f, false);
         return;
     }
-    FaceBead* fb = FaceBeadFor(face);
-    if (fb == nullptr) {
-        return;
+    for (FaceBead& fb : neck_->faceBeads) {
+        if (fb.face != face) {
+            continue;
+        }
+        WalkFaceBoundaryFromPhiCycle(loop_->faces[face], *neck_, crossingOf_, fb.boundaryBeads,
+                                     fb.boundaryDots, nullptr, 0.0f, false);
     }
-    WalkFaceBoundaryFromPhiCycle(loop_->faces[face], *neck_, crossingOf_, fb->boundaryBeads,
-                                 fb->boundaryDots, nullptr, 0.0f, false);
 }
 
 void Physics::RefreshFaceBody(int face)
 {
+    if (!nesting_.empty()) {
+        // Hole rings may reference this face's exterior walk; rebuild all.
+        ResolveHoles();
+        RebuildFaceBodiesFromCache();
+        return;
+    }
     if (IsExterior(face)) {
         const int slot = ExteriorSlot(face);
         if (slot < 0) {
@@ -536,9 +683,8 @@ void Physics::RefreshFaceBody(int face)
         else {
             faceBodies_.push_back(std::move(bodies));
         }
-        RebuildHoneycombSpokes();
-        return;
     }
+    RebuildHoneycombSpokes();
 }
 
 void Physics::RefreshFaceBodiesForEdge(int edge)
@@ -706,6 +852,38 @@ void Physics::ApplyFaceCollisions(std::vector<Vector2>& force, int total,
             applyPair(a, b);
         });
     }
+
+    // Cross-component: one pass over every component's exterior boundary.
+    // Interior faces stay in their per-face groups above.
+    std::unordered_set<int> exteriorBodies;
+    for (const std::vector<int>& boundary : exteriorBoundaries_) {
+        for (const int bead : boundary) {
+            if (bead >= 0 && bead < beads && !neck_->beads[static_cast<size_t>(bead)].removed) {
+                exteriorBodies.insert(bead);
+            }
+        }
+    }
+    for (const FaceBead& fb : neck_->faceBeads) {
+        if (!IsCircleFaceBead(fb)) {
+            continue;
+        }
+        for (const int bead : fb.boundaryBeads) {
+            if (bead >= 0 && bead < beads && !neck_->beads[static_cast<size_t>(bead)].removed) {
+                exteriorBodies.insert(bead);
+            }
+        }
+    }
+    if (exteriorBodies.size() >= 2) {
+        collisionGrid_.Clear();
+        collisionGrid_.Reserve(exteriorBodies.size());
+        for (const int bead : exteriorBodies) {
+            const Vector2 p = PosOf(bead);
+            collisionGrid_.Insert(bead, p.x, p.y);
+        }
+        collisionGrid_.ForEachCandidatePair([&](int a, int b) {
+            applyPair(a, b);
+        });
+    }
 }
 
 void Physics::Integrate(float dt)
@@ -759,21 +937,23 @@ void Physics::Integrate(float dt)
         }
     }
 
-    // Inverse-square repulsion between interiors on distinct R3 triangle sides
-    // so the face stays open while a side is stripped.
-    if (r3Active_ && r3Phase_ == R3Phase::PreHoneycomb &&
-        params_->r3CycleRepelStiffness > 0.0f) {
-        RebuildR3CycleSideBeads();
+    // Inverse-square repulsion between interiors on distinct sides of the
+    // moved face (R3 triangle, R2 bigon) so it stays open while stripped.
+    const bool repelSides = (r3Active_ && r3Phase_ == R3Phase::PreHoneycomb) ||
+                            (r2Active_ && shortenSub_ != ShortenSub::Spoke);
+    if (repelSides && params_->r3CycleRepelStiffness > 0.0f) {
+        RebuildMoveRepelSides();
         const float cutoff = 4.0f * diameter_;
         const float rFloor = 0.25f * diameter_;
         const float k = params_->r3CycleRepelStiffness;
-        for (int i = 0; i < 3; ++i) {
-            for (int j = i + 1; j < 3; ++j) {
-                for (const int a : r3CycleSideBeads_[i]) {
+        const int sides = static_cast<int>(moveRepelSides_.size());
+        for (int i = 0; i < sides; ++i) {
+            for (int j = i + 1; j < sides; ++j) {
+                for (const int a : moveRepelSides_[static_cast<size_t>(i)]) {
                     if (a < 0 || a >= beads || neck_->beads[static_cast<size_t>(a)].removed) {
                         continue;
                     }
-                    for (const int b : r3CycleSideBeads_[j]) {
+                    for (const int b : moveRepelSides_[static_cast<size_t>(j)]) {
                         if (b < 0 || b >= beads ||
                             neck_->beads[static_cast<size_t>(b)].removed) {
                             continue;
@@ -804,8 +984,8 @@ void Physics::Integrate(float dt)
     std::vector<char> haveIncenter(static_cast<size_t>(faces), 0);
     std::vector<Vector2> incenterTarget(static_cast<size_t>(faces), Vector2{0.0f, 0.0f});
     std::unordered_set<int> r3Faces;
-    if (r3Active_) {
-        CollectR3InvolvedFaces(&r3Faces);
+    if (MoveActive()) {
+        CollectMoveInvolvedFaces(&r3Faces);
     }
     // Crossing the polygon is not arrival: the disk still overlaps edge
     // beads and chatters. Collisions and honeycomb spokes stay off until the
@@ -815,11 +995,12 @@ void Physics::Integrate(float dt)
     for (int fi = 0; fi < faces; ++fi) {
         const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
         std::vector<Vec2d> poly;
-        const bool havePoly = FaceBoundaryPolygon(fb.face, &poly);
+        std::vector<std::vector<Vec2d>> holes;
+        const bool havePoly = FaceBeadBoundaryPolygon(fb, &poly, &holes);
         const bool inside =
-            !havePoly || PointInPolygon(Vec2d{static_cast<double>(fb.pos.x),
-                                              static_cast<double>(fb.pos.y)},
-                                        poly);
+            !havePoly || PointInPolygonWithHoles(Vec2d{static_cast<double>(fb.pos.x),
+                                                       static_cast<double>(fb.pos.y)},
+                                                 poly, holes);
         if (!havePoly) {
             faceArrived[static_cast<size_t>(fi)] = inside ? 1 : 0;
             if (!inside) {
@@ -827,7 +1008,9 @@ void Physics::Integrate(float dt)
             }
             continue;
         }
-        const InscribedCircle circle = LargestInscribedCircle(poly, incenterPrecision);
+        const InscribedCircle circle = holes.empty()
+                                           ? LargestInscribedCircle(poly, incenterPrecision)
+                                           : LargestInscribedCircle(poly, holes, incenterPrecision);
         Vec2d target = circle.center;
         if (!circle.found) {
             target = {0.0, 0.0};
@@ -892,7 +1075,11 @@ void Physics::Integrate(float dt)
         const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(fi)];
         const bool arrived = faceArrived[static_cast<size_t>(fi)] != 0;
         bool pullToIncenter = !arrived;
-        if (r3Active_ && r3Faces.count(fb.face) != 0) {
+        if (MoveActive() && r3Faces.count(fb.face) != 0) {
+            pullToIncenter = true;
+        }
+        // Both beads of a pending merge chase the merged face's incenter.
+        if (mergeKeepLabel_ >= 0 && (fb.label == mergeKeepLabel_ || fb.label == mergeDropLabel_)) {
             pullToIncenter = true;
         }
         if (FaceHasHoneycombSpokes(fi) && arrived) {
@@ -915,6 +1102,29 @@ void Physics::Integrate(float dt)
         }
     }
 
+    // R2 spoke: pull the bigon's two vertex beads together (rest = diameter)
+    // so they become tangent before the crossings are removed.
+    if (r2Active_ && shortenSub_ == ShortenSub::Spoke) {
+        const int x = r2Info_.vertexBead[0];
+        const int y = r2Info_.vertexBead[1];
+        if (x >= 0 && x < beads && y >= 0 && y < beads && x != y &&
+            !neck_->beads[static_cast<size_t>(x)].removed &&
+            !neck_->beads[static_cast<size_t>(y)].removed) {
+            const Vector2 pa = PosOf(x);
+            const Vector2 pb = PosOf(y);
+            const Vector2 d = {pb.x - pa.x, pb.y - pa.y};
+            const float len = std::sqrt(d.x * d.x + d.y * d.y);
+            if (len > 1e-6f) {
+                const float mag = params_->honeycombFortifyStiffness * (len - diameter_);
+                const Vector2 dir = {d.x / len, d.y / len};
+                force[x].x += mag * dir.x;
+                force[x].y += mag * dir.y;
+                force[y].x -= mag * dir.x;
+                force[y].y -= mag * dir.y;
+            }
+        }
+    }
+
     // Hard-body collisions within each face (spatial broad phase).
     ApplyFaceCollisions(force, total, skipFaceCollision);
 
@@ -932,7 +1142,7 @@ void Physics::Integrate(float dt)
             continue;
         }
         float mass = 1.0f;
-        if (r3Active_ && body >= beads) {
+        if (MoveActive() && body >= beads) {
             mass = std::max(params_->r3FaceBeadMass, 1e-3f);
         }
         Vector2& v = VelOf(body);
@@ -1140,7 +1350,7 @@ int Physics::SubstepsForStep() const
         anyUnsettled = true;
         const double threshold =
             params_->tensionThreshold * std::sqrt(static_cast<double>(pending.length));
-        if (EdgeTension(pending.edge) > threshold * 0.5) {
+        if (PendingTension(pending) > threshold * 0.5) {
             allRelaxing = false;
             break;
         }
@@ -1347,12 +1557,17 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
         CountReferences(neighborC, neighborA) != 1) {
         return -1;
     }
+    const int strandA = neck_->beads[static_cast<size_t>(neighborA)].strand;
+    const int strandC = neck_->beads[static_cast<size_t>(neighborC)].strand;
+    const int strand = (strandA >= 0) ? strandA : strandC;
+
     for (int i = 0; i < BeadCount(); ++i) {
         Bead& slot = neck_->beads[static_cast<size_t>(i)];
         if (!slot.removed || slot.isVertex || slot.edge != edge) {
             continue;
         }
         ReinsertEdgeBead(i, neighborA, neighborC);
+        neck_->beads[static_cast<size_t>(i)].strand = strand;
         return i;
     }
 
@@ -1360,6 +1575,7 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
     bead.isVertex = false;
     bead.removed = false;
     bead.edge = edge;
+    bead.strand = strand;
     const Vector2 pa = PosOf(neighborA);
     const Vector2 pc = PosOf(neighborC);
     bead.pos = {(pa.x + pc.x) * 0.5f, (pa.y + pc.y) * 0.5f};
@@ -1382,6 +1598,96 @@ void Physics::MaintainBeadSpacingDuringDrag()
     }
 
     const float gapThreshold = params_->gapSize * diameter_;
+
+    if (!dragged.isVertex && dragged.edge == 0) {
+        FaceBead* pad = nullptr;
+        for (FaceBead& fb : neck_->faceBeads) {
+            if (!IsCircleFaceBead(fb)) {
+                continue;
+            }
+            for (const int bead : fb.boundaryBeads) {
+                if (bead == dragBody_) {
+                    pad = &fb;
+                    break;
+                }
+            }
+            if (pad != nullptr) {
+                break;
+            }
+        }
+
+        std::vector<int> ring;
+        if (pad != nullptr && pad->boundaryBeads.size() >= 2) {
+            ring = pad->boundaryBeads;
+        }
+        else {
+            int prev = -1;
+            int cur = dragBody_;
+            const int limit = BeadCount() + 2;
+            for (int guard = 0; guard < limit; ++guard) {
+                if (cur < 0 || cur >= BeadCount() ||
+                    neck_->beads[static_cast<size_t>(cur)].removed) {
+                    break;
+                }
+                ring.push_back(cur);
+                const Bead& b = neck_->beads[static_cast<size_t>(cur)];
+                int nxt = -1;
+                if (prev < 0) {
+                    nxt = (b.neighbors[1] >= 0) ? b.neighbors[1] : b.neighbors[0];
+                }
+                else {
+                    nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+                }
+                prev = cur;
+                cur = nxt;
+                if (cur == dragBody_) {
+                    break;
+                }
+            }
+        }
+
+        int gapA = -1;
+        int gapB = -1;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            const int a = ring[i];
+            const int b = ring[(i + 1) % ring.size()];
+            if (a < 0 || b < 0 || a >= BeadCount() || b >= BeadCount()) {
+                continue;
+            }
+            if (neck_->beads[static_cast<size_t>(a)].removed ||
+                neck_->beads[static_cast<size_t>(b)].removed) {
+                continue;
+            }
+            const Vector2 pa = PosOf(a);
+            const Vector2 pb = PosOf(b);
+            const float dx = pb.x - pa.x;
+            const float dy = pb.y - pa.y;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if (len > gapThreshold) {
+                gapA = a;
+                gapB = b;
+                break;
+            }
+        }
+        if (gapA < 0) {
+            return;
+        }
+        if (InsertEdgeBeadBetween(gapA, gapB, 0) < 0) {
+            return;
+        }
+        if (pad != nullptr) {
+            RefreshCircleBoundary(*pad);
+        }
+        else {
+            for (FaceBead& fb : neck_->faceBeads) {
+                if (IsCircleFaceBead(fb)) {
+                    RefreshCircleBoundary(fb);
+                }
+            }
+        }
+        RefreshCircleStructures();
+        return;
+    }
 
     std::vector<int> edgesToCheck;
     if (dragged.isVertex) {
@@ -1464,22 +1770,37 @@ Vector2 Physics::FaceBeadPosition(int face) const
 
 FaceBead* Physics::FaceBeadFor(int face)
 {
+    FaceBead* found = nullptr;
     for (FaceBead& fb : neck_->faceBeads) {
-        if (fb.face == face) {
+        if (fb.face != face) {
+            continue;
+        }
+        // While a merge is pending, prefer the bead that survives.
+        if (mergeKeepLabel_ >= 0 && fb.label == mergeKeepLabel_) {
             return &fb;
         }
+        if (found == nullptr) {
+            found = &fb;
+        }
     }
-    return nullptr;
+    return found;
 }
 
 const FaceBead* Physics::FaceBeadFor(int face) const
 {
+    const FaceBead* found = nullptr;
     for (const FaceBead& fb : neck_->faceBeads) {
-        if (fb.face == face) {
+        if (fb.face != face) {
+            continue;
+        }
+        if (mergeKeepLabel_ >= 0 && fb.label == mergeKeepLabel_) {
             return &fb;
         }
+        if (found == nullptr) {
+            found = &fb;
+        }
     }
-    return nullptr;
+    return found;
 }
 
 bool Physics::FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const
@@ -1510,7 +1831,7 @@ bool Physics::FaceBoundaryPolygon(int face, std::vector<Vec2d>* out) const
     return out->size() >= 3;
 }
 
-void Physics::CollectR3InvolvedFaces(std::unordered_set<int>* out) const
+void Physics::CollectMoveInvolvedFaces(std::unordered_set<int>* out) const
 {
     if (out == nullptr) {
         return;
@@ -1522,27 +1843,307 @@ void Physics::CollectR3InvolvedFaces(std::unordered_set<int>* out) const
             out->insert(it->second);
         }
     };
-    if (r3Info_.face >= 0 && !IsExterior(r3Info_.face)) {
-        out->insert(r3Info_.face);
+    const auto addEdge = [&](int h) {
+        addHalf(h);
+        addHalf(-h);
+    };
+    if (r3Active_) {
+        if (r3Info_.face >= 0 && !IsExterior(r3Info_.face)) {
+            out->insert(r3Info_.face);
+        }
+        for (int i = 0; i < 3; ++i) {
+            addEdge(r3Info_.h[i]);
+            addEdge(r3Info_.a[i]);
+            addEdge(r3Info_.b[i]);
+        }
     }
-    for (int i = 0; i < 3; ++i) {
-        addHalf(r3Info_.h[i]);
-        addHalf(-r3Info_.h[i]);
-        addHalf(r3Info_.a[i]);
-        addHalf(-r3Info_.a[i]);
-        addHalf(r3Info_.b[i]);
-        addHalf(-r3Info_.b[i]);
+    if (r1Active_) {
+        addEdge(r1Info_.e);
+        addEdge(r1Info_.p);
+        addEdge(r1Info_.q);
     }
+    if (r2Active_) {
+        addEdge(r2Info_.h0);
+        addEdge(r2Info_.h1);
+        addEdge(r2Info_.a);
+        addEdge(r2Info_.b);
+        addEdge(r2Info_.ap);
+        addEdge(r2Info_.bp);
+    }
+}
+
+bool Physics::FaceBeadBoundaryPolygon(const FaceBead& fb, std::vector<Vec2d>* out) const
+{
+    if (fb.face >= 0) {
+        return FaceBoundaryPolygon(fb.face, out);
+    }
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+    out->reserve(fb.boundaryBeads.size());
+    for (const int bead : fb.boundaryBeads) {
+        if (bead < 0 || bead >= BeadCount() || neck_->beads[static_cast<size_t>(bead)].removed) {
+            continue;
+        }
+        const Vector2 p = PosOf(bead);
+        out->push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+    }
+    return out->size() >= 3;
+}
+
+bool Physics::FaceBeadBoundaryPolygon(const FaceBead& fb, std::vector<Vec2d>* out,
+                                      std::vector<std::vector<Vec2d>>* holes) const
+{
+    if (holes != nullptr) {
+        holes->clear();
+    }
+    if (!FaceBeadBoundaryPolygon(fb, out)) {
+        return false;
+    }
+    if (holes == nullptr) {
+        return true;
+    }
+    for (const std::vector<int>& ring : fb.holeBeads) {
+        std::vector<Vec2d> poly;
+        poly.reserve(ring.size());
+        for (const int bead : ring) {
+            if (bead < 0 || bead >= BeadCount() ||
+                neck_->beads[static_cast<size_t>(bead)].removed) {
+                continue;
+            }
+            const Vector2 p = PosOf(bead);
+            poly.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+        }
+        if (poly.size() >= 3) {
+            holes->push_back(std::move(poly));
+        }
+    }
+    return true;
 }
 
 bool Physics::FaceBeadInsideFace(const FaceBead& fb) const
 {
     std::vector<Vec2d> poly;
-    if (!FaceBoundaryPolygon(fb.face, &poly)) {
+    std::vector<std::vector<Vec2d>> holes;
+    if (!FaceBeadBoundaryPolygon(fb, &poly, &holes)) {
         return true;
     }
     const Vec2d center{static_cast<double>(fb.pos.x), static_cast<double>(fb.pos.y)};
-    return PointInPolygon(center, poly);
+    return PointInPolygonWithHoles(center, poly, holes);
+}
+
+bool Physics::IsCircleFaceBead(const FaceBead& fb) const
+{
+    return fb.face < 0 || unknot_;
+}
+
+int Physics::LiveBoundaryCount(const FaceBead& fb) const
+{
+    int live = 0;
+    for (const int bead : fb.boundaryBeads) {
+        if (bead >= 0 && bead < BeadCount() && !neck_->beads[static_cast<size_t>(bead)].removed) {
+            ++live;
+        }
+    }
+    return live;
+}
+
+int Physics::FarthestLiveBoundaryBead(const FaceBead& fb) const
+{
+    const Vector2 center = {fb.pos.x, fb.pos.y};
+    int best = -1;
+    float bestDist = -1.0f;
+    for (const int bead : fb.boundaryBeads) {
+        if (bead < 0 || bead >= BeadCount()) {
+            continue;
+        }
+        const Bead& b = neck_->beads[static_cast<size_t>(bead)];
+        if (b.removed || b.isVertex) {
+            continue;
+        }
+        if (b.neighbors[0] == b.neighbors[1] || b.neighbors[0] < 0 || b.neighbors[1] < 0) {
+            continue;
+        }
+        const Vector2 p = PosOf(bead);
+        const float dx = p.x - center.x;
+        const float dy = p.y - center.y;
+        const float dist = dx * dx + dy * dy;
+        if (dist > bestDist) {
+            bestDist = dist;
+            best = bead;
+        }
+    }
+    return best;
+}
+
+void Physics::RefreshCircleBoundary(FaceBead& fb)
+{
+    int start = -1;
+    for (const int bead : fb.boundaryBeads) {
+        if (bead >= 0 && bead < BeadCount() && !neck_->beads[static_cast<size_t>(bead)].removed) {
+            start = bead;
+            break;
+        }
+    }
+    fb.boundaryBeads.clear();
+    if (start < 0) {
+        return;
+    }
+    int prev = -1;
+    int cur = start;
+    const int limit = BeadCount() + 2;
+    for (int guard = 0; guard < limit; ++guard) {
+        if (cur < 0 || cur >= BeadCount() || neck_->beads[static_cast<size_t>(cur)].removed) {
+            break;
+        }
+        fb.boundaryBeads.push_back(cur);
+        const Bead& b = neck_->beads[static_cast<size_t>(cur)];
+        int nxt = -1;
+        if (prev < 0) {
+            nxt = (b.neighbors[1] >= 0) ? b.neighbors[1] : b.neighbors[0];
+        }
+        else {
+            nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+        }
+        prev = cur;
+        cur = nxt;
+        if (cur == start) {
+            break;
+        }
+    }
+    fb.RefreshBoundaryDots(*neck_);
+    fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
+}
+
+void Physics::RefreshCircleStructures()
+{
+    if (unknot_) {
+        RebuildUnknotStructures();
+        return;
+    }
+    RebuildSpringsFromChains();
+    RebuildFaceBodiesFromCache();
+    structureDirty_ = false;
+}
+
+double Physics::CircleRingTension(const FaceBead& fb) const
+{
+    const std::vector<int>& ring = fb.boundaryBeads;
+    if (ring.size() < 2) {
+        return 0.0;
+    }
+    double stretch = 0.0;
+    double compression = 0.0;
+    int segments = 0;
+    for (size_t i = 0; i < ring.size(); ++i) {
+        const int a = ring[i];
+        const int c = ring[(i + 1) % ring.size()];
+        if (a < 0 || c < 0 || a >= BeadCount() || c >= BeadCount()) {
+            continue;
+        }
+        if (neck_->beads[static_cast<size_t>(a)].removed ||
+            neck_->beads[static_cast<size_t>(c)].removed) {
+            continue;
+        }
+        const Vector2 pa = PosOf(a);
+        const Vector2 pc = PosOf(c);
+        const float len = std::sqrt((pc.x - pa.x) * (pc.x - pa.x) + (pc.y - pa.y) * (pc.y - pa.y));
+        const float delta = len - diameter_;
+        const double tension = params_->springStiffness * std::fabs(delta);
+        if (delta > 0.0f) {
+            stretch += tension;
+        }
+        else {
+            compression += tension;
+        }
+        ++segments;
+    }
+    if (segments <= 0) {
+        return 0.0;
+    }
+    const double beadCount = static_cast<double>(segments);
+    return (stretch + compression) / beadCount;
+}
+
+bool Physics::RemoveCircleExcessIfAllowed(bool oneBead)
+{
+    if (unknot_) {
+        if (structureDirty_) {
+            RebuildUnknotStructures();
+        }
+    }
+    else if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    bool any = false;
+    for (FaceBead& fb : neck_->faceBeads) {
+        if (!IsCircleFaceBead(fb)) {
+            continue;
+        }
+        if (LiveBoundaryCount(fb) <= std::max(6, HoleFloor(fb))) {
+            continue;
+        }
+        const int bead = FarthestLiveBoundaryBead(fb);
+        if (bead < 0) {
+            continue;
+        }
+        RemoveEdgeBead(bead);
+        if (!neck_->beads[static_cast<size_t>(bead)].removed) {
+            continue;
+        }
+        RefreshCircleBoundary(fb);
+        any = true;
+        if (oneBead) {
+            break;
+        }
+    }
+    if (!any) {
+        return false;
+    }
+    RefreshCircleStructures();
+    return true;
+}
+
+void Physics::QueueCircleSettlePendings()
+{
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        const FaceBead& fb = neck_->faceBeads[fi];
+        if (!IsCircleFaceBead(fb) || fb.boundaryBeads.size() < 2) {
+            continue;
+        }
+        float length = 0.0f;
+        const std::vector<int>& ring = fb.boundaryBeads;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            const int a = ring[i];
+            const int c = ring[(i + 1) % ring.size()];
+            if (a < 0 || c < 0 || a >= BeadCount() || c >= BeadCount()) {
+                continue;
+            }
+            if (neck_->beads[static_cast<size_t>(a)].removed ||
+                neck_->beads[static_cast<size_t>(c)].removed) {
+                continue;
+            }
+            const Vector2 pa = PosOf(a);
+            const Vector2 pc = PosOf(c);
+            length += std::sqrt((pc.x - pa.x) * (pc.x - pa.x) + (pc.y - pa.y) * (pc.y - pa.y));
+        }
+        PendingEdge pending;
+        pending.edge = 0;
+        pending.faceBead = static_cast<int>(fi);
+        pending.length = length;
+        pendingEdges_.push_back(pending);
+    }
+}
+
+double Physics::PendingTension(const PendingEdge& pending) const
+{
+    if (pending.faceBead >= 0 &&
+        pending.faceBead < static_cast<int>(neck_->faceBeads.size())) {
+        return CircleRingTension(neck_->faceBeads[static_cast<size_t>(pending.faceBead)]);
+    }
+    return EdgeTension(pending.edge);
 }
 
 double Physics::FaceExcessArea(const FaceBead& fb) const
@@ -1600,7 +2201,12 @@ void Physics::StrikeHoneycombEdges(bool boundariesCurrent,
         if (!boundariesCurrent && refreshFaces.count(f) != 0) {
             WalkFaceBoundaryNoDots(f);
         }
-        if (fb->boundaryBeads.size() > 6) {
+        // Honeycomb faces keep their 6 beads; faces with holes keep enough
+        // boundary to stay clear of the nested rings.
+        const int live = static_cast<int>(fb->boundaryBeads.size());
+        const bool honeycomb = live <= 6 && fb->holeBeads.empty();
+        const bool holeFloor = !fb->holeBeads.empty() && live <= HoleFloor(*fb);
+        if (!honeycomb && !holeFloor) {
             continue;
         }
         for (const int h : loop_->faces[f]) {
@@ -1804,6 +2410,18 @@ int Physics::RemoveBeadFromEdge(int edge, bool bendPassOnly, int* neighborA, int
 bool Physics::BeginRemovalRound()
 {
     const ScopedTimer timer(debugTiming_ ? &debugTimings_.beginRemovalRoundMs : nullptr);
+    if (unknot_) {
+        pendingEdges_.clear();
+        if (structureDirty_) {
+            RebuildUnknotStructures();
+        }
+        if (!RemoveCircleExcessIfAllowed()) {
+            return false;
+        }
+        QueueCircleSettlePendings();
+        framesWaited_ = 0;
+        return !pendingEdges_.empty();
+    }
     const bool evaluateGeometry = needsGeometryEval_;
 
     std::unordered_set<int> honeycombFaces;
@@ -1964,6 +2582,11 @@ bool Physics::BeginRemovalRound()
         needsGeometryEval_ = false;
     }
 
+    const bool circleRemoved = RemoveCircleExcessIfAllowed();
+    if (circleRemoved) {
+        QueueCircleSettlePendings();
+    }
+
     if (pendingEdges_.empty()) {
         return false;
     }
@@ -1974,19 +2597,15 @@ bool Physics::BeginRemovalRound()
 
 void Physics::StartAutoTighten()
 {
-    if (autoActive_ || r3Active_) {
-        return;
-    }
-    if (unknot_) {
-        autoActive_ = true;
-        framesWaited_ = 0;
-        pendingEdges_.clear();
+    if (autoActive_ || MoveActive()) {
         return;
     }
     autoActive_ = true;
-    needsGeometryEval_ = true;
+    needsGeometryEval_ = !unknot_;
     removedEdgesLastRound_.clear();
-    struckEdges_.assign(loop_->numEdges + 1, false);
+    if (!unknot_) {
+        struckEdges_.assign(loop_->numEdges + 1, false);
+    }
     pendingEdges_.clear();
     framesWaited_ = 0;
     if (!BeginRemovalRound()) {
@@ -2016,16 +2635,6 @@ void Physics::AutoStep()
     if (!autoActive_) {
         return;
     }
-    if (unknot_) {
-        for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
-            Step();
-        }
-        framesWaited_ += params_->autoStepsPerFrame;
-        if (framesWaited_ >= params_->relaxStepsMax) {
-            autoActive_ = false;
-        }
-        return;
-    }
     if (pendingEdges_.empty()) {
         autoActive_ = false;
         return;
@@ -2045,7 +2654,7 @@ void Physics::AutoStep()
         }
         const double threshold =
             params_->tensionThreshold * std::sqrt(static_cast<double>(pending.length));
-        if (EdgeTension(pending.edge) < threshold) {
+        if (PendingTension(pending) < threshold) {
             pending.settled = true;
         }
         else if (framesWaited_ >= params_->relaxStepsMax) {
@@ -2058,11 +2667,17 @@ void Physics::AutoStep()
             std::unordered_set<int> reinsertedEdges;
             for (const int k : failedEdges) {
                 for (PendingEdge& pending : pendingEdges_) {
-                    if (pending.edge == k && pending.removedBead >= 0) {
-                        ReinsertEdgeBead(pending.removedBead, pending.neighborA, pending.neighborC);
-                        pending.settled = true;
-                        reinsertedEdges.insert(k);
+                    if (pending.edge != k || pending.removedBead < 0) {
+                        continue;
                     }
+                    // Circle strips never go back above 6 beads.
+                    if (pending.faceBead >= 0 || pending.edge == 0) {
+                        pending.settled = true;
+                        continue;
+                    }
+                    ReinsertEdgeBead(pending.removedBead, pending.neighborA, pending.neighborC);
+                    pending.settled = true;
+                    reinsertedEdges.insert(k);
                 }
                 if (k >= 1 && k < static_cast<int>(struckEdges_.size())) {
                     struckEdges_[k] = true;
@@ -2105,9 +2720,7 @@ void Physics::ClearR3State()
     }
     r3CutEdges_.clear();
     r3ExteriorEdges_.clear();
-    for (std::vector<int>& side : r3CycleSideBeads_) {
-        side.clear();
-    }
+    moveRepelSides_.clear();
     r3Meeting_[0] = r3Meeting_[1] = r3Meeting_[2] = -1;
     r3StallFrames_ = 0;
     r3SettleEdge_ = -1;
@@ -2147,25 +2760,34 @@ std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
     return chain;
 }
 
-void Physics::RebuildR3CycleSideBeads()
+void Physics::RebuildMoveRepelSides()
 {
-    for (int i = 0; i < 3; ++i) {
-        r3CycleSideBeads_[i].clear();
-        const int vb = r3Info_.vertexBead[i];
-        if (vb < 0) {
-            continue;
+    moveRepelSides_.clear();
+    std::vector<std::pair<int, int>> sides; // (vertex bead, half-edge leaving it)
+    if (r3Active_) {
+        for (int i = 0; i < 3; ++i) {
+            sides.emplace_back(r3Info_.vertexBead[i], r3Info_.h[i]);
         }
-        const std::vector<int> chain = WalkSideChain(vb, r3Info_.h[i]);
-        if (chain.size() < 3) {
-            continue;
-        }
-        for (size_t t = 1; t + 1 < chain.size(); ++t) {
-            const int b = chain[t];
-            if (b < 0 || b >= BeadCount() || neck_->beads[static_cast<size_t>(b)].removed) {
-                continue;
+    }
+    else if (r2Active_) {
+        sides.emplace_back(r2Info_.vertexBead[0], r2Info_.h0);
+        sides.emplace_back(r2Info_.vertexBead[1], r2Info_.h1);
+    }
+    for (const std::pair<int, int>& side : sides) {
+        const int vb = side.first;
+        const int h = side.second;
+        std::vector<int> interiors;
+        if (vb >= 0) {
+            const std::vector<int> chain = WalkSideChain(vb, h);
+            for (size_t t = 1; t + 1 < chain.size(); ++t) {
+                const int b = chain[t];
+                if (b < 0 || b >= BeadCount() || neck_->beads[static_cast<size_t>(b)].removed) {
+                    continue;
+                }
+                interiors.push_back(b);
             }
-            r3CycleSideBeads_[i].push_back(b);
         }
+        moveRepelSides_.push_back(std::move(interiors));
     }
 }
 
@@ -2263,6 +2885,14 @@ int Physics::RemoveFarthestFromFaceCenter(int edge, int face)
     if (structureDirty_) {
         RebuildStructures();
     }
+    return RemoveFarthestFromPoint(edge, FaceBeadPosition(face));
+}
+
+int Physics::RemoveFarthestFromPoint(int edge, Vector2 fc)
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
     else {
         RefreshEdgeChain(edge);
     }
@@ -2273,7 +2903,6 @@ int Physics::RemoveFarthestFromFaceCenter(int edge, int face)
     if (static_cast<int>(chain.size()) - 2 < 2) {
         return -1; // need more than one interior to remove
     }
-    const Vector2 fc = FaceBeadPosition(face);
     int best = -1;
     float bestDist = -1.0f;
     for (size_t i = 1; i + 1 < chain.size(); ++i) {
@@ -2371,11 +3000,33 @@ bool Physics::HoneycombFloorBlocksRemoval(int edge)
         }
         WalkFaceBoundaryNoDots(f);
         const FaceBead* fb = FaceBeadFor(f);
-        if (fb != nullptr && fb->boundaryBeads.size() <= 6) {
+        if (fb == nullptr) {
+            continue;
+        }
+        const int live = static_cast<int>(fb->boundaryBeads.size());
+        if (live <= 6 || (!fb->holeBeads.empty() && live <= HoleFloor(*fb))) {
             return true;
         }
     }
     return false;
+}
+
+int Physics::HoleFloor(const FaceBead& fb) const
+{
+    if (fb.holeBeads.empty()) {
+        return 0;
+    }
+    // Enough perimeter for the nested rings plus an annulus one bead wide
+    // (2*pi*2 diameters ~ 12 beads) so the region's own bead still fits.
+    int live = 0;
+    for (const std::vector<int>& ring : fb.holeBeads) {
+        for (const int b : ring) {
+            if (b >= 0 && b < BeadCount() && !neck_->beads[static_cast<size_t>(b)].removed) {
+                ++live;
+            }
+        }
+    }
+    return live + 12;
 }
 
 bool Physics::InsertLargestGapIfNeeded()
@@ -2468,9 +3119,9 @@ bool Physics::RemoveMonogonExcessIfAllowed()
     return false;
 }
 
-void Physics::StartR3PostRepair()
+void Physics::StartPostRepair()
 {
-    if (autoActive_ || r3Active_) {
+    if (autoActive_ || MoveActive()) {
         return;
     }
     ClearR3State();
@@ -2483,11 +3134,23 @@ void Physics::StartR3PostRepair()
 
 void Physics::R3PostRepairStep()
 {
+    TryFaceMerge();
     if (++r3StallFrames_ > 800) {
         r3Active_ = false;
         r3Complete_ = false;
         ClearR3State();
         structureDirty_ = true;
+        return;
+    }
+    if (unknot_) {
+        // No crossings left: ring excess is shed passively (IdleStep).
+        Step();
+        if (!FaceMergePending()) {
+            r3Active_ = false;
+            r3Complete_ = false;
+            ClearR3State();
+            structureDirty_ = true;
+        }
         return;
     }
     if (r3PreSub_ == R3PreSub::NeedInsert) {
@@ -2503,13 +3166,15 @@ void Physics::R3PostRepairStep()
         return;
     }
 
+    // Monogon / circle excess is not stripped here: it is shed slowly in the
+    // resting state (see IdleStep) so the move ends without a snap.
     int n = 0;
     bool any = false;
-    while (n++ < 8 && (RemoveSharpBendIfAllowed() || RemoveMonogonExcessIfAllowed())) {
+    while (n++ < 8 && RemoveSharpBendIfAllowed()) {
         any = true;
     }
     Step();
-    if (!any) {
+    if (!any && !FaceMergePending()) {
         r3Active_ = false;
         r3Complete_ = false;
         ClearR3State();
@@ -2517,9 +3182,175 @@ void Physics::R3PostRepairStep()
     }
 }
 
+// ---------------------------------------------------------------------------
+// Resting state: passive tightening of monogons (to 5 beads) and circles
+// (to 6 beads), one bead every params_->passiveTightenInterval frames.
+// ---------------------------------------------------------------------------
+
+void Physics::IdleStep()
+{
+    Step();
+    if (params_->passiveTightenInterval <= 0 || MoveActive() || autoActive_ ||
+        dragBody_ >= 0 || FaceMergePending()) {
+        idleFrames_ = 0;
+        return;
+    }
+    if (++idleFrames_ < params_->passiveTightenInterval) {
+        return;
+    }
+    idleFrames_ = 0;
+    PassiveTightenOnce();
+}
+
+bool Physics::PassiveTightenOnce()
+{
+    if (unknot_) {
+        return RemoveCircleExcessIfAllowed(true);
+    }
+    if (loop_ == nullptr || loop_->numEdges <= 0) {
+        return false;
+    }
+    if (RemoveMonogonExcessIfAllowed()) {
+        return true;
+    }
+    return RemoveCircleExcessIfAllowed(true);
+}
+
+// ---------------------------------------------------------------------------
+// Face-bead merge (connected R2): two beads share the merged face.
+// ---------------------------------------------------------------------------
+
+void Physics::SetFaceMergePair(int keepLabel, int dropLabel)
+{
+    mergeKeepLabel_ = -1;
+    mergeDropLabel_ = -1;
+    mergeFrames_ = 0;
+    if (keepLabel < 0 || dropLabel < 0 || keepLabel == dropLabel) {
+        return;
+    }
+    const FaceBead* keep = nullptr;
+    const FaceBead* drop = nullptr;
+    for (const FaceBead& fb : neck_->faceBeads) {
+        if (fb.label == keepLabel) {
+            keep = &fb;
+        }
+        else if (fb.label == dropLabel) {
+            drop = &fb;
+        }
+    }
+    if (keep == nullptr || drop == nullptr || keep->face < 0 || keep->face != drop->face) {
+        return;
+    }
+    mergeKeepLabel_ = keepLabel;
+    mergeDropLabel_ = dropLabel;
+    structureDirty_ = true;
+}
+
+void Physics::TryFaceMerge()
+{
+    if (mergeKeepLabel_ < 0) {
+        return;
+    }
+    int keepIdx = -1;
+    int dropIdx = -1;
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        const int label = neck_->faceBeads[fi].label;
+        if (label == mergeKeepLabel_) {
+            keepIdx = static_cast<int>(fi);
+        }
+        else if (label == mergeDropLabel_) {
+            dropIdx = static_cast<int>(fi);
+        }
+    }
+    if (keepIdx < 0 || dropIdx < 0) {
+        mergeKeepLabel_ = -1;
+        mergeDropLabel_ = -1;
+        mergeFrames_ = 0;
+        structureDirty_ = true;
+        return;
+    }
+    ++mergeFrames_;
+    const Vector2 a = PosOf(BeadCount() + keepIdx);
+    const Vector2 b = PosOf(BeadCount() + dropIdx);
+    const float dx = a.x - b.x;
+    const float dy = a.y - b.y;
+    const float dist = std::sqrt(dx * dx + dy * dy);
+    constexpr int kMergeFrameCap = 600;
+    if (dist > 0.25f * diameter_ && mergeFrames_ < kMergeFrameCap) {
+        return;
+    }
+    neck_->faceBeads.erase(neck_->faceBeads.begin() + dropIdx);
+    if (static_cast<size_t>(dropIdx) < fvel_.size()) {
+        fvel_.erase(fvel_.begin() + dropIdx);
+    }
+    mergeKeepLabel_ = -1;
+    mergeDropLabel_ = -1;
+    mergeFrames_ = 0;
+    structureDirty_ = true;
+}
+
+// ---------------------------------------------------------------------------
+// Face-bead erase / restore for shortening moves
+// ---------------------------------------------------------------------------
+
+bool Physics::EraseFaceBead(int face)
+{
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        if (neck_->faceBeads[fi].face != face) {
+            continue;
+        }
+        erasedFaceBead_ = neck_->faceBeads[fi];
+        erasedFaceBeadIndex_ = fi;
+        erasedFaceBeadValid_ = true;
+        neck_->faceBeads.erase(neck_->faceBeads.begin() + static_cast<long>(fi));
+        if (fi < fvel_.size()) {
+            fvel_.erase(fvel_.begin() + static_cast<long>(fi));
+        }
+        structureDirty_ = true;
+        return true;
+    }
+    return false;
+}
+
+void Physics::RestoreErasedFaceBead()
+{
+    if (!erasedFaceBeadValid_) {
+        return;
+    }
+    const size_t at = std::min(erasedFaceBeadIndex_, neck_->faceBeads.size());
+    neck_->faceBeads.insert(neck_->faceBeads.begin() + static_cast<long>(at), erasedFaceBead_);
+    if (fvel_.size() + 1 == neck_->faceBeads.size()) {
+        fvel_.insert(fvel_.begin() + static_cast<long>(std::min(at, fvel_.size())),
+                     Vector2{0.0f, 0.0f});
+    }
+    else {
+        fvel_.assign(neck_->faceBeads.size(), Vector2{0.0f, 0.0f});
+    }
+    erasedFaceBeadValid_ = false;
+    structureDirty_ = true;
+}
+
+bool Physics::PadEdgeToward(int vertexBead, int halfEdge, int minInteriors)
+{
+    for (int guard = 0; guard < 8; ++guard) {
+        const std::vector<int> chain = WalkSideChain(vertexBead, halfEdge);
+        if (chain.size() < 2) {
+            return false;
+        }
+        if (static_cast<int>(chain.size()) - 2 >= minInteriors) {
+            return true;
+        }
+        if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(halfEdge)) < 0) {
+            return false;
+        }
+        structureDirty_ = true;
+    }
+    return false;
+}
+
 bool Physics::StartR3Move(int face)
 {
-    if (unknot_ || r3Active_ || autoActive_) {
+    if (unknot_ || MoveActive() || autoActive_ || FaceHasHoles(face) || FaceMergePending()) {
         return false;
     }
     ClearR3State();
@@ -2537,19 +3368,7 @@ bool Physics::StartR3Move(int face)
     }
 
     const auto padToward = [&](int vertexBead, int halfEdge, int minInteriors) -> bool {
-        for (int guard = 0; guard < 8; ++guard) {
-            const std::vector<int> chain = WalkSideChain(vertexBead, halfEdge);
-            if (chain.size() < 2) {
-                return false;
-            }
-            if (static_cast<int>(chain.size()) - 2 >= minInteriors) {
-                return true;
-            }
-            if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(halfEdge)) < 0) {
-                return false;
-            }
-        }
-        return false;
+        return PadEdgeToward(vertexBead, halfEdge, minInteriors);
     };
 
     // Pad any empty face-cycle side up to one interior bead.
@@ -3218,6 +4037,20 @@ void Physics::R3Step()
 
 void Physics::EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop)
 {
+    // Exterior labels from the pre-move analysis (half-edge labels unchanged).
+    std::vector<int> edges;
+    for (int i = 0; i < 3; ++i) {
+        edges.push_back(r3Info_.a[i]);
+        edges.push_back(r3Info_.b[i]);
+    }
+    EnsureExteriorHoneycombMins(newLoop, edges);
+}
+
+void Physics::EnsureExteriorHoneycombMins(const Multiloop& newLoop, const std::vector<int>& edges)
+{
+    if (newLoop.numEdges <= 0 || newLoop.sigma.MaxAbsLabel() == 0) {
+        return;
+    }
     // Build half-edge → crossing and half-edge → face maps for the rewritten loop.
     std::unordered_map<int, int> crossingOf;
     const std::vector<std::vector<int>> cycles = newLoop.sigma.Cycles();
@@ -3309,21 +4142,14 @@ void Physics::EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop)
         return InsertEdgeBeadBetween(chain[best], chain[best + 1], edge);
     };
 
-    // Unique exterior labels from the pre-move analysis (half-edge labels unchanged).
     std::vector<int> exteriors;
-    for (int i = 0; i < 3; ++i) {
-        for (const int h : {r3Info_.a[i], r3Info_.b[i]}) {
-            const int k = std::abs(h);
-            bool have = false;
-            for (const int e : exteriors) {
-                if (e == k) {
-                    have = true;
-                    break;
-                }
-            }
-            if (!have) {
-                exteriors.push_back(k);
-            }
+    for (const int h : edges) {
+        const int k = std::abs(h);
+        if (k < 1 || k > newLoop.numEdges) {
+            continue;
+        }
+        if (std::find(exteriors.begin(), exteriors.end(), k) == exteriors.end()) {
+            exteriors.push_back(k);
         }
     }
 
@@ -3349,5 +4175,340 @@ void Physics::EnsureR3ExteriorHoneycombMins(const Multiloop& newLoop)
                 break;
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shortening moves (R1 / R2)
+// ---------------------------------------------------------------------------
+
+void Physics::MoveStep()
+{
+    if (r1Active_ || r2Active_) {
+        ShortenStep();
+        return;
+    }
+    if (r3Active_) {
+        R3Step();
+    }
+}
+
+void Physics::CancelMove()
+{
+    if (r1Active_ || r2Active_) {
+        CancelShorten();
+        return;
+    }
+    CancelR3Move();
+}
+
+void Physics::CancelShorten()
+{
+    r1Active_ = false;
+    r1Complete_ = false;
+    r2Active_ = false;
+    r2Complete_ = false;
+    shortenStripEdges_.clear();
+    shortenStripTarget_.clear();
+    shortenPadEdges_.clear();
+    shortenStallFrames_ = 0;
+    spokeFrames_ = 0;
+    r2DidExteriorPad_ = false;
+    shortenSub_ = ShortenSub::NeedRemove;
+    ClearR3State();
+    RestoreErasedFaceBead();
+    structureDirty_ = true;
+}
+
+void Physics::GetR1Result(R1FaceInfo* info) const
+{
+    if (info != nullptr) {
+        *info = r1Info_;
+    }
+}
+
+void Physics::GetR2Result(R2FaceInfo* info) const
+{
+    if (info != nullptr) {
+        *info = r2Info_;
+    }
+}
+
+Vector2 Physics::ShortenCenter() const
+{
+    if (r1Active_) {
+        if (r1Info_.vertexBead >= 0 && r1Info_.vertexBead < BeadCount()) {
+            return PosOf(r1Info_.vertexBead);
+        }
+    }
+    else if (r2Active_) {
+        const int x = r2Info_.vertexBead[0];
+        const int y = r2Info_.vertexBead[1];
+        if (x >= 0 && x < BeadCount() && y >= 0 && y < BeadCount()) {
+            const Vector2 px = PosOf(x);
+            const Vector2 py = PosOf(y);
+            return Vector2{0.5f * (px.x + py.x), 0.5f * (px.y + py.y)};
+        }
+    }
+    if (erasedFaceBeadValid_) {
+        return Vector2{erasedFaceBead_.pos.x, erasedFaceBead_.pos.y};
+    }
+    return Vector2{0.0f, 0.0f};
+}
+
+bool Physics::StartR1Move(int face)
+{
+    if (unknot_ || MoveActive() || autoActive_ || FaceHasHoles(face) || FaceMergePending()) {
+        return false;
+    }
+    R1FaceInfo info;
+    if (!AnalyzeR1Face(*loop_, nullptr, face, &info)) {
+        return false;
+    }
+    if (info.crossing < 0 || info.crossing >= static_cast<int>(neck_->crossingBead.size())) {
+        return false;
+    }
+    const int vb = neck_->crossingBead[static_cast<size_t>(info.crossing)];
+    if (vb < 0 || vb >= BeadCount()) {
+        return false;
+    }
+    // The loop keeps two beads; p and q need distinct terminals (two beads
+    // when they are the same edge, i.e. the one-crossing kink diagram).
+    if (!PadEdgeToward(vb, info.e, 2)) {
+        return false;
+    }
+    const int minPQ = (std::abs(info.p) == std::abs(info.q)) ? 2 : 1;
+    if (!PadEdgeToward(vb, info.p, minPQ) || !PadEdgeToward(vb, info.q, minPQ)) {
+        return false;
+    }
+    if (!AnalyzeR1Face(*loop_, neck_, face, &info)) {
+        return false;
+    }
+    ClearR3State();
+    r1Info_ = info;
+    r1Active_ = true;
+    r1Complete_ = false;
+    shortenSub_ = ShortenSub::NeedRemove;
+    shortenStripEdges_ = {std::abs(info.e)};
+    shortenStripTarget_ = {2};
+    shortenPadEdges_.clear();
+    shortenStallFrames_ = 0;
+    EraseFaceBead(face);
+    structureDirty_ = true;
+    RebuildStructures();
+    return true;
+}
+
+bool Physics::StartR2Move(int face)
+{
+    if (unknot_ || MoveActive() || autoActive_ || FaceHasHoles(face) || FaceMergePending()) {
+        return false;
+    }
+    R2FaceInfo info;
+    if (!AnalyzeR2Face(*loop_, nullptr, face, &info)) {
+        return false;
+    }
+    for (int i = 0; i < 2; ++i) {
+        if (info.crossing[i] < 0 ||
+            info.crossing[i] >= static_cast<int>(neck_->crossingBead.size())) {
+            return false;
+        }
+        info.vertexBead[i] = neck_->crossingBead[static_cast<size_t>(info.crossing[i])];
+        if (info.vertexBead[i] < 0 || info.vertexBead[i] >= BeadCount()) {
+            return false;
+        }
+    }
+    // Each bigon side keeps one bead.
+    if (!PadEdgeToward(info.vertexBead[0], info.h0, 1) ||
+        !PadEdgeToward(info.vertexBead[1], info.h1, 1)) {
+        return false;
+    }
+    // Exterior arcs need distinct terminals: two beads when an arc runs
+    // between X and Y (or loops back to its own vertex).
+    const auto padExterior = [&](int vertexBead, int h) -> bool {
+        const std::vector<int> chain = WalkSideChain(vertexBead, h);
+        int minInteriors = 1;
+        if (chain.size() >= 2) {
+            const int other = chain.back();
+            if (other == info.vertexBead[0] || other == info.vertexBead[1]) {
+                minInteriors = 2;
+            }
+        }
+        return PadEdgeToward(vertexBead, h, minInteriors);
+    };
+    if (!padExterior(info.vertexBead[0], info.a) || !padExterior(info.vertexBead[0], info.b) ||
+        !padExterior(info.vertexBead[1], info.ap) || !padExterior(info.vertexBead[1], info.bp)) {
+        return false;
+    }
+    if (!AnalyzeR2Face(*loop_, neck_, face, &info)) {
+        return false;
+    }
+    ClearR3State();
+    r2Info_ = info;
+    r2Active_ = true;
+    r2Complete_ = false;
+    shortenSub_ = ShortenSub::NeedRemove;
+    shortenStripEdges_ = {std::abs(info.h0), std::abs(info.h1)};
+    shortenStripTarget_ = {1, 1};
+    shortenPadEdges_.clear();
+    for (const int h : {info.a, info.b, info.ap, info.bp}) {
+        const int k = std::abs(h);
+        if (std::find(shortenStripEdges_.begin(), shortenStripEdges_.end(), k) !=
+                shortenStripEdges_.end() ||
+            std::find(shortenPadEdges_.begin(), shortenPadEdges_.end(), k) !=
+                shortenPadEdges_.end()) {
+            continue;
+        }
+        shortenPadEdges_.push_back(k);
+    }
+    shortenStallFrames_ = 0;
+    spokeFrames_ = 0;
+    r2DidExteriorPad_ = false;
+    EraseFaceBead(face);
+    structureDirty_ = true;
+    RebuildStructures();
+    return true;
+}
+
+void Physics::ShortenStep()
+{
+    if ((!r1Active_ && !r2Active_) || r1Complete_ || r2Complete_) {
+        return;
+    }
+    if (++shortenStallFrames_ > 4000) {
+        CancelShorten();
+        return;
+    }
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    const auto interiorsOf = [&](int edge) {
+        RefreshEdgeChain(edge);
+        return EdgeInteriorCount(edge);
+    };
+
+    if (shortenSub_ == ShortenSub::NeedRemove) {
+        int pick = -1;
+        float bestLen = -1.0f;
+        for (size_t i = 0; i < shortenStripEdges_.size(); ++i) {
+            const int k = shortenStripEdges_[i];
+            if (interiorsOf(k) <= shortenStripTarget_[i]) {
+                continue;
+            }
+            const float len = EdgeChainLength(k);
+            if (len > bestLen) {
+                bestLen = len;
+                pick = k;
+            }
+        }
+        if (pick < 0) {
+            if (r1Active_) {
+                r1Complete_ = true;
+                return;
+            }
+            if (!shortenPadEdges_.empty() && !r2DidExteriorPad_) {
+                r2DidExteriorPad_ = true;
+                shortenSub_ = ShortenSub::NeedInsert;
+                return;
+            }
+            shortenSub_ = ShortenSub::Spoke;
+            spokeFrames_ = 0;
+            return;
+        }
+        r3SettleLength_ = EdgeChainLength(pick);
+        if (RemoveFarthestFromPoint(pick, ShortenCenter()) < 0) {
+            CancelShorten();
+            return;
+        }
+        r3SettleEdge_ = pick;
+        r3SettleFrames_ = 0;
+        shortenSub_ = ShortenSub::SettlingRemove;
+        return;
+    }
+
+    if (shortenSub_ == ShortenSub::SettlingRemove) {
+        if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
+            // R2: do not pad exteriors between side-bead removals. That
+            // tension-threshold loop can keep inserting and drag the
+            // diagram off-screen. One pad pass runs after both sides are
+            // stripped (see NeedRemove).
+            shortenSub_ = (r2Active_ || shortenPadEdges_.empty()) ? ShortenSub::NeedRemove
+                                                                  : ShortenSub::NeedInsert;
+        }
+        return;
+    }
+
+    if (shortenSub_ == ShortenSub::NeedInsert) {
+        for (const int k : shortenPadEdges_) {
+            RefreshEdgeChain(k);
+        }
+        int bestEdge = -1;
+        double bestTension = -1.0;
+        for (const int k : shortenPadEdges_) {
+            const double t = EdgeTension(k);
+            if (t > bestTension) {
+                bestTension = t;
+                bestEdge = k;
+            }
+        }
+        if (bestEdge < 0) {
+            shortenSub_ = ShortenSub::NeedRemove;
+            return;
+        }
+        const float length = EdgeChainLength(bestEdge);
+        const double threshold =
+            params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
+        if (bestTension < threshold) {
+            shortenSub_ = ShortenSub::NeedRemove;
+            return;
+        }
+        r3SettleLength_ = length;
+        if (InsertBeadAtFarthestGap(bestEdge) < 0) {
+            shortenSub_ = ShortenSub::NeedRemove;
+            return;
+        }
+        r3SettleEdge_ = bestEdge;
+        r3SettleFrames_ = 0;
+        shortenSub_ = ShortenSub::SettlingInsert;
+        return;
+    }
+
+    if (shortenSub_ == ShortenSub::SettlingInsert) {
+        if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
+            shortenSub_ = ShortenSub::NeedRemove;
+        }
+        return;
+    }
+
+    // Spoke: the X-Y spring (see Integrate) draws the vertex beads together.
+    // The move fires on a short timer rather than on a settling threshold,
+    // which could stall (or drag the diagram away) on a tense necklace.
+    for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
+        Step();
+    }
+    ++spokeFrames_;
+    const int x = r2Info_.vertexBead[0];
+    const int y = r2Info_.vertexBead[1];
+    if (x < 0 || y < 0 || x >= BeadCount() || y >= BeadCount()) {
+        CancelShorten();
+        return;
+    }
+    if (spokeFrames_ >= params_->r2SpokeFrames) {
+        // Timer, not a settle threshold: pull X and Y to near-tangency so
+        // the splice does not start with a long chord between them.
+        const Vector2 px = PosOf(x);
+        const Vector2 py = PosOf(y);
+        const float dx = py.x - px.x;
+        const float dy = py.y - px.y;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        const float maxLen = 1.05f * diameter_;
+        if (len > maxLen && len > 1e-6f) {
+            const float extra = 0.5f * (len - maxLen);
+            const Vector2 dir = {dx / len, dy / len};
+            SetPosOf(x, {px.x + extra * dir.x, px.y + extra * dir.y});
+            SetPosOf(y, {py.x - extra * dir.x, py.y - extra * dir.y});
+        }
+        r2Complete_ = true;
     }
 }

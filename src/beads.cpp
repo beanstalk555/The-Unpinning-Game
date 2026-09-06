@@ -360,6 +360,45 @@ Necklace BuildPackedNecklace(const Multiloop& loop, const PackedGridLayout& pack
         necklace.radius = 0.25f;
     }
 
+    // Tamassia paths stay in local integer coords; shift each crossing
+    // component's beads by its float pack origin.
+    for (size_t i = 0; i < components.size(); ++i) {
+        if (components[i].kind != MultiloopPart::Crossings ||
+            i >= packed.componentOrigin.size()) {
+            continue;
+        }
+        const PackOrigin origin = packed.componentOrigin[i];
+        if (origin.x == 0.0f && origin.y == 0.0f) {
+            continue;
+        }
+        std::unordered_set<int> owned(components[i].halfEdges.begin(),
+                                      components[i].halfEdges.end());
+        for (Bead& bead : necklace.beads) {
+            bool mine = false;
+            if (bead.isVertex) {
+                for (const int h : bead.sigmaCycle) {
+                    if (owned.count(h) != 0) {
+                        mine = true;
+                        break;
+                    }
+                }
+            }
+            else if (owned.count(bead.edge) != 0 || owned.count(-bead.edge) != 0) {
+                mine = true;
+            }
+            if (mine) {
+                bead.pos.x += origin.x;
+                bead.pos.y += origin.y;
+            }
+        }
+        for (FaceBead& fb : necklace.faceBeads) {
+            if (ComponentOwnsFace(components[i], loop, fb.face)) {
+                fb.pos.x += origin.x;
+                fb.pos.y += origin.y;
+            }
+        }
+    }
+
     int nextLabel = 1;
     for (const FaceBead& fb : necklace.faceBeads) {
         nextLabel = std::max(nextLabel, fb.label + 1);
@@ -369,12 +408,11 @@ Necklace BuildPackedNecklace(const Multiloop& loop, const PackedGridLayout& pack
         if (components[i].kind != MultiloopPart::Circle) {
             continue;
         }
-        const GridPoint origin =
-            (i < packed.componentOrigin.size()) ? packed.componentOrigin[i] : GridPoint{};
+        const PackOrigin origin =
+            (i < packed.componentOrigin.size()) ? packed.componentOrigin[i] : PackOrigin{};
         const int strand =
             (components[i].strand >= 0) ? components[i].strand : nextStrand++;
-        AppendCircleToNecklace(necklace, {static_cast<float>(origin.x), static_cast<float>(origin.y)},
-                               nextLabel++, strand);
+        AppendCircleToNecklace(necklace, {origin.x, origin.y}, nextLabel++, strand);
     }
     return necklace;
 }

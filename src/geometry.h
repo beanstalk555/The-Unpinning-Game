@@ -34,6 +34,16 @@ struct InscribedCircle
 InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices,
                                        double precision = 0.0);
 
+// Same for a polygon with holes: the region inside `outer` and outside every
+// hole. Distance is measured to the nearest ring (outer or hole).
+InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& outer,
+                                       const std::vector<std::vector<Vec2d>>& holes,
+                                       double precision = 0.0);
+
+// True when `point` is inside `outer` and inside none of the holes.
+bool PointInPolygonWithHoles(const Vec2d& point, const std::vector<Vec2d>& outer,
+                             const std::vector<std::vector<Vec2d>>& holes);
+
 // True when chords (p0,p2) and (p1,p3) interleave around `center` — the
 // geometric pairing of opposite slots at a 4-valent vertex bead. False when
 // a neighbor coincides with the center or the two pairs occupy disjoint arcs.

@@ -4,6 +4,9 @@
 #include "beads.h"
 #include "physics.h"
 #include "physics_params.h"
+#include "move_rewrite.h"
+#include "r1_move.h"
+#include "r2_move.h"
 #include "r3_move.h"
 #include "random_multiloop.h"
 #include "drawing.h"
@@ -858,6 +861,10 @@ bool RunPermutationTests()
                 Check(packed.layout.crossingPositions.size() == 2,
                       "packed layout has 2 crossing positions");
                 Check(packed.componentOrigin.size() == 2, "packed layout has two component slots");
+                Check(near(packed.componentOrigin[0].x, 0.0),
+                      "first figure-eight pack origin is 0");
+                Check(near(packed.componentOrigin[1].x, 2.5),
+                      "second figure-eight pack origin is width plus one bead diameter");
                 const Necklace necklace = BuildPackedNecklace(loop, packed, comps);
                 Check(necklace.crossingBead.size() == 2, "packed necklace has 2 vertex beads");
                 int circleBeads = 0;
@@ -918,6 +925,29 @@ bool RunPermutationTests()
                 }
                 Check(circleBeads == 8, "circle component contributes 8 edge beads");
                 Check(circleFaces == 1, "circle component contributes one face bead");
+                {
+                    Necklace neck = necklace;
+                    PhysicsParams params;
+                    std::unordered_set<int> exteriors;
+                    for (const int f : ExteriorFaceIndices(comps)) {
+                        exteriors.insert(f);
+                    }
+                    Physics phys(loop, neck, params, exteriors);
+                    phys.Step();
+                    bool sawCirclePoly = false;
+                    for (const FaceBead& fb : neck.faceBeads) {
+                        if (fb.face >= 0) {
+                            continue;
+                        }
+                        std::vector<Vec2d> poly;
+                        Check(phys.FaceBeadBoundaryPolygon(fb, &poly),
+                              "mixed packed circle pad has a usable boundary polygon");
+                        Check(poly.size() >= 3,
+                              "mixed packed circle pad polygon has at least 3 vertices");
+                        sawCirclePoly = true;
+                    }
+                    Check(sawCirclePoly, "mixed packed diagram has a circle-pad polygon");
+                }
             }
             catch (const std::exception& e) {
                 Check(false, (std::string("packed circle+figure-eight: ") + e.what()).c_str());
@@ -983,6 +1013,182 @@ bool RunPermutationTests()
             }
             Check(strands.count(0) == 1 && strands.count(1) == 1 && strands.size() == 2,
                   "two packed circles use distinct strand colors");
+            Check(near(packed.componentOrigin[0].x, 0.0), "first packed circle origin is 0");
+            Check(near(packed.componentOrigin[1].x, 1.5),
+                  "second packed circle origin is 1 plus one bead diameter");
+            float minCross = 1e9f;
+            for (const Bead& a : necklace.beads) {
+                if (a.isVertex || a.edge != 0 || a.strand != 0) {
+                    continue;
+                }
+                for (const Bead& b : necklace.beads) {
+                    if (b.isVertex || b.edge != 0 || b.strand != 1) {
+                        continue;
+                    }
+                    const float dx = a.pos.x - b.pos.x;
+                    const float dy = a.pos.y - b.pos.y;
+                    minCross = std::min(minCross, std::sqrt(dx * dx + dy * dy));
+                }
+            }
+            Check(std::fabs(minCross - 0.5f) < 1e-4f,
+                  "nearest beads of two packed circles are one diameter apart");
+            {
+                Necklace neck = necklace;
+                PhysicsParams params;
+                Physics phys(dummy, neck, params, std::unordered_set<int>{});
+                phys.Step();
+                int circlePolys = 0;
+                for (const FaceBead& fb : neck.faceBeads) {
+                    if (fb.face >= 0) {
+                        continue;
+                    }
+                    std::vector<Vec2d> poly;
+                    Check(phys.FaceBeadBoundaryPolygon(fb, &poly),
+                          "packed circle pad has a usable boundary polygon");
+                    Check(poly.size() >= 3, "packed circle pad polygon has at least 3 vertices");
+                    ++circlePolys;
+                }
+                Check(circlePolys == 2, "two packed circles each expose a boundary polygon");
+
+                const auto minRingDist = [](const Necklace& n) {
+                    float best = 1e9f;
+                    for (const Bead& a : n.beads) {
+                        if (a.removed || a.isVertex || a.edge != 0 || a.strand != 0) {
+                            continue;
+                        }
+                        for (const Bead& b : n.beads) {
+                            if (b.removed || b.isVertex || b.edge != 0 || b.strand != 1) {
+                                continue;
+                            }
+                            const float dx = a.pos.x - b.pos.x;
+                            const float dy = a.pos.y - b.pos.y;
+                            best = std::min(best, std::sqrt(dx * dx + dy * dy));
+                        }
+                    }
+                    return best;
+                };
+                for (Bead& b : neck.beads) {
+                    if (!b.removed && !b.isVertex && b.edge == 0 && b.strand == 1) {
+                        b.pos.x -= 0.35f;
+                    }
+                }
+                for (FaceBead& fb : neck.faceBeads) {
+                    if (fb.face < 0 && fb.pos.x > 0.75f) {
+                        fb.pos.x -= 0.35f;
+                    }
+                }
+                Check(minRingDist(neck) < 0.4f, "shoved packed circles start overlapping");
+                for (int i = 0; i < 80; ++i) {
+                    phys.Step();
+                }
+                Check(minRingDist(neck) + 1e-3f >= 2.0f * neck.radius,
+                      "exterior collisions keep packed circle rings a diameter apart");
+            }
+        }
+
+        {
+            Necklace neck = BuildUnknotNecklace();
+            PhysicsParams params;
+            Physics phys(neck, params);
+            Check(static_cast<int>(neck.beads.size()) == 8, "unknot starts with 8 edge beads");
+            phys.StartAutoTighten();
+            int frames = 0;
+            while (phys.AutoTightening() && frames < 4000) {
+                phys.AutoStep();
+                ++frames;
+            }
+            Check(!phys.AutoTightening(), "unknot auto-tighten reaches idle");
+            int live = 0;
+            for (const Bead& b : neck.beads) {
+                if (!b.removed && !b.isVertex) {
+                    ++live;
+                }
+            }
+            Check(live == 6, "unknot auto-tighten leaves 6 edge beads");
+            Check(phys.HoneycombFortifyCount() >= 1, "unknot ring is a honeycomb pad");
+        }
+
+        {
+            const SigmaNotation twoCirclesTighten = ParseSigmaNotation("()()");
+            const Permutation emptyTighten;
+            const Multiloop dummyTighten(emptyTighten);
+            std::vector<MultiloopComponent> compsTighten = twoCirclesTighten.components;
+            const PackedGridLayout packedTighten = ComputePackedGridLayout(dummyTighten, compsTighten);
+            Necklace neck = BuildPackedNecklace(dummyTighten, packedTighten, compsTighten);
+            PhysicsParams params;
+            Physics phys(dummyTighten, neck, params, std::unordered_set<int>{});
+            phys.StartAutoTighten();
+            int frames = 0;
+            while (phys.AutoTightening() && frames < 4000) {
+                phys.AutoStep();
+                ++frames;
+            }
+            Check(!phys.AutoTightening(), "two packed circles auto-tighten reach idle");
+            int circlePads = 0;
+            for (const FaceBead& fb : neck.faceBeads) {
+                if (fb.face >= 0) {
+                    continue;
+                }
+                int live = 0;
+                for (const int bead : fb.boundaryBeads) {
+                    if (bead >= 0 && bead < static_cast<int>(neck.beads.size()) &&
+                        !neck.beads[static_cast<size_t>(bead)].removed) {
+                        ++live;
+                    }
+                }
+                Check(live == 6, "packed circle auto-tighten leaves 6 live boundary beads");
+                ++circlePads;
+            }
+            Check(circlePads == 2, "two packed circles each have a face bead");
+            Check(phys.HoneycombFortifyCount() >= 2,
+                  "packed circle pads are included in honeycomb fortify count");
+        }
+
+        {
+            const SigmaNotation oneCircle = ParseSigmaNotation("()");
+            const Permutation emptyDrag;
+            const Multiloop dummyDrag(emptyDrag);
+            const PackedGridLayout packedDrag =
+                ComputePackedGridLayout(dummyDrag, oneCircle.components);
+            Necklace neck = BuildPackedNecklace(dummyDrag, packedDrag, oneCircle.components);
+            PhysicsParams params;
+            Physics phys(dummyDrag, neck, params, std::unordered_set<int>{});
+            phys.Step();
+            int bead = -1;
+            for (int i = 0; i < static_cast<int>(neck.beads.size()); ++i) {
+                if (!neck.beads[static_cast<size_t>(i)].removed &&
+                    !neck.beads[static_cast<size_t>(i)].isVertex &&
+                    neck.beads[static_cast<size_t>(i)].edge == 0) {
+                    bead = i;
+                    break;
+                }
+            }
+            Check(bead >= 0, "packed circle has an edge bead to drag");
+            if (bead >= 0) {
+                const int strand = neck.beads[static_cast<size_t>(bead)].strand;
+                const Vector2 p = {neck.beads[static_cast<size_t>(bead)].pos.x,
+                                   neck.beads[static_cast<size_t>(bead)].pos.y};
+                phys.BeginDrag(bead, p);
+                neck.beads[static_cast<size_t>(bead)].pos.x += 3.0f;
+                phys.Drag({p.x + 3.0f, p.y});
+                for (int i = 0; i < 8; ++i) {
+                    phys.Step();
+                }
+                phys.EndDrag();
+                int live = 0;
+                int wrongStrand = 0;
+                for (const Bead& b : neck.beads) {
+                    if (b.removed || b.isVertex || b.edge != 0) {
+                        continue;
+                    }
+                    ++live;
+                    if (b.strand != strand) {
+                        ++wrongStrand;
+                    }
+                }
+                Check(live > 8, "drag-insert grows a packed circle past 8 beads");
+                Check(wrongStrand == 0, "drag-inserted circle beads keep strand color");
+            }
         }
 
         {
@@ -1093,6 +1299,780 @@ bool RunPermutationTests()
                           (std::string("pentagram + star of david pipeline: ") + e.what()).c_str());
                 }
             }
+        }
+    }
+
+    // ---- Shortening Reidemeister moves (R1 / R2): rewrite, physics, nesting ----
+    {
+        struct Scene
+        {
+            std::unique_ptr<Multiloop> loop;
+            std::vector<MultiloopComponent> comps;
+            Necklace neck;
+            std::unordered_set<int> exteriors;
+        };
+        // Builds a packed scene; `exterior` overrides the crossing component's
+        // exterior face when >= 0.
+        const auto buildScene = [&](const char* text, int exterior) {
+            std::unique_ptr<Scene> scene(new Scene());
+            const SigmaNotation parsed = ParseSigmaNotation(text);
+            scene->loop.reset(new Multiloop(parsed.sigma));
+            scene->comps = parsed.components;
+            ApplyDefaultExteriors(*scene->loop, scene->comps);
+            if (exterior >= 0) {
+                for (MultiloopComponent& c : scene->comps) {
+                    if (c.kind == MultiloopPart::Crossings) {
+                        c.exteriorFace = exterior;
+                    }
+                }
+            }
+            const PackedGridLayout packed = ComputePackedGridLayout(*scene->loop, scene->comps);
+            scene->neck = BuildPackedNecklace(*scene->loop, packed, scene->comps);
+            for (const int f : ExteriorFaceIndices(scene->comps)) {
+                scene->exteriors.insert(f);
+            }
+            return scene;
+        };
+        // Every live edge bead has two neighbors that reference it back; every
+        // vertex slot links to an edge bead that references the vertex.
+        const auto linksOk = [](const Necklace& neck) {
+            bool ok = true;
+            for (size_t i = 0; i < neck.beads.size(); ++i) {
+                const Bead& bead = neck.beads[i];
+                if (bead.removed) {
+                    continue;
+                }
+                if (bead.isVertex) {
+                    for (int s = 0; s < 4; ++s) {
+                        const int nb = bead.neighborOfHalfEdge[s];
+                        ok = ok && nb >= 0 && nb < static_cast<int>(neck.beads.size()) &&
+                             !neck.beads[static_cast<size_t>(nb)].isVertex &&
+                             (neck.beads[static_cast<size_t>(nb)].neighbors[0] == static_cast<int>(i) ||
+                              neck.beads[static_cast<size_t>(nb)].neighbors[1] == static_cast<int>(i));
+                    }
+                }
+                else {
+                    for (int s = 0; s < 2; ++s) {
+                        const int nb = bead.neighbors[s];
+                        if (nb < 0 || nb >= static_cast<int>(neck.beads.size()) ||
+                            neck.beads[static_cast<size_t>(nb)].removed) {
+                            ok = false;
+                            continue;
+                        }
+                        const Bead& other = neck.beads[static_cast<size_t>(nb)];
+                        bool back = false;
+                        if (other.isVertex) {
+                            for (int t = 0; t < 4; ++t) {
+                                back = back || other.neighborOfHalfEdge[t] == static_cast<int>(i);
+                            }
+                        }
+                        else {
+                            back = other.neighbors[0] == static_cast<int>(i) ||
+                                   other.neighbors[1] == static_cast<int>(i);
+                        }
+                        ok = ok && back;
+                    }
+                }
+            }
+            return ok;
+        };
+        // Every edge of `loop` walks vertex to vertex with its label on each
+        // interior bead; every edge-0 bead lies on a closed ring.
+        const auto walksOk = [](const Multiloop& loop, const Necklace& neck) {
+            bool ok = true;
+            const std::vector<std::vector<int>> cycles = loop.sigma.Cycles();
+            std::map<int, int> crossingOf;
+            for (int c = 0; c < static_cast<int>(cycles.size()); ++c) {
+                for (const int h : cycles[static_cast<size_t>(c)]) {
+                    crossingOf[h] = c;
+                }
+            }
+            for (int k = 1; k <= loop.numEdges; ++k) {
+                if (crossingOf.count(k) == 0 || crossingOf.count(-k) == 0) {
+                    ok = false;
+                    continue;
+                }
+                const int vStart = neck.crossingBead[static_cast<size_t>(crossingOf[k])];
+                const int vEnd = neck.crossingBead[static_cast<size_t>(crossingOf[-k])];
+                int prev = vStart;
+                int cur = neck.NeighborToward(vStart, k);
+                int guard = 0;
+                while (cur >= 0 && !neck.beads[static_cast<size_t>(cur)].isVertex &&
+                       guard < static_cast<int>(neck.beads.size())) {
+                    ok = ok && neck.beads[static_cast<size_t>(cur)].edge == k;
+                    const Bead& b = neck.beads[static_cast<size_t>(cur)];
+                    const int nxt = (b.neighbors[0] == prev) ? b.neighbors[1] : b.neighbors[0];
+                    prev = cur;
+                    cur = nxt;
+                    ++guard;
+                }
+                ok = ok && cur == vEnd;
+            }
+            for (size_t i = 0; i < neck.beads.size(); ++i) {
+                const Bead& b = neck.beads[i];
+                if (b.isVertex || b.removed || b.edge != 0) {
+                    continue;
+                }
+                ok = ok && CircleRingThrough(neck, static_cast<int>(i)).size() >= 3;
+            }
+            return ok;
+        };
+        const auto runMove = [](Physics& phys) {
+            int frames = 0;
+            while (phys.MoveActive() && !phys.MoveComplete() && frames < 20000) {
+                phys.MoveStep();
+                ++frames;
+            }
+            return phys.MoveComplete();
+        };
+        const auto runPost = [](Physics& phys) {
+            int frames = 0;
+            while ((phys.MoveActive() || phys.FaceMergePending()) && frames < 6000) {
+                phys.MoveStep();
+                ++frames;
+            }
+            return !phys.MoveActive() && !phys.FaceMergePending();
+        };
+        const auto finiteFaces = [](const Multiloop& loop, const std::unordered_set<int>& ext) {
+            int n = 0;
+            for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {
+                if (ext.count(f) == 0) {
+                    ++n;
+                }
+            }
+            return n;
+        };
+
+        // -- Rewrite helper --
+        {
+            const Multiloop kink(Permutation::FromString("(1,-1,2,-2)"));
+            RewriteResult rw;
+            Check(DeleteCrossingsAndSplice(kink, {0}, {1}, {{2, -2}}, &rw),
+                  "rewrite: deleting the only crossing of a kink succeeds");
+            Check(rw.numNewEdges == 0 && rw.sigma.Cycles().empty(),
+                  "rewrite: kink without its crossing has no edges");
+            Check(rw.circleArcs.size() == 1 && rw.circleStrand.size() == 1 &&
+                      rw.circleStrand[0] == 0,
+                  "rewrite: the surviving arc closes into one circle on strand 0");
+
+            const Multiloop twoKinks(Permutation::FromString("(1,-1,-4,2)(3,-3,-2,4)"));
+            R1FaceInfo r1;
+            Check(AnalyzeR1Face(twoKinks, nullptr, 1, &r1) && r1.e == 1,
+                  "rewrite: face (1) of the two-kink curve is a monogon on edge 1");
+            RewriteResult rw2;
+            Check(DeleteCrossingsAndSplice(twoKinks, {r1.crossing}, {1}, {{r1.p, r1.q}}, &rw2),
+                  "rewrite: deleting one kink of two succeeds");
+            Check(rw2.numNewEdges == 2 && rw2.sigma.Cycles().size() == 1 &&
+                      ValidateMultiloopSigma(rw2.sigma).empty(),
+                  "rewrite: one kink left, labels compact and valid");
+            Check(rw2.MapEdge(1) == 0, "rewrite: deleted edge maps to 0");
+            Check(rw2.MapEdge(2) == 1 && rw2.MapEdge(4) == 1,
+                  "rewrite: merged arc keeps the smallest label, shifted down");
+            Check(rw2.MapEdge(3) == 2, "rewrite: untouched edge shifts down over the gap");
+            Check(rw2.circleArcs.empty(), "rewrite: no circle when a crossing survives");
+        }
+
+        // -- R1 inside a larger diagram: two kinks -> one kink --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,-1,-4,2)(3,-3,-2,4)", 0);
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            const size_t faceBeadsBefore = s->neck.faceBeads.size();
+            Check(phys.StartR1Move(1), "R1: move starts on a monogon");
+            Check(s->neck.faceBeads.size() + 1 == faceBeadsBefore,
+                  "R1: the monogon's face bead is erased when the move starts");
+            Check(runMove(phys), "R1: loop strips to two beads");
+            R1FaceInfo info;
+            phys.GetR1Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR1(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R1: finalize succeeds");
+            if (moved) {
+                Check(ValidateMultiloopSigma(moved->sigma).empty() && moved->numEdges == 2 &&
+                          moved->sigma.Cycles().size() == 1,
+                      "R1: one crossing and two compact edges remain");
+                Check(moved->numStrands == 1, "R1: strand count preserved");
+                Check(res.components.size() == 1 &&
+                          res.components[0].kind == MultiloopPart::Crossings &&
+                          res.components[0].exteriorFace >= 0 && !res.disconnected,
+                      "R1: one crossing component with a remapped exterior");
+                Check(linksOk(s->neck), "R1: necklace links are consistent");
+                Check(walksOk(*moved, s->neck), "R1: every edge walks vertex to vertex");
+                std::unordered_set<int> ext;
+                for (const int f : ExteriorFaceIndices(res.components)) {
+                    ext.insert(f);
+                }
+                Check(static_cast<int>(s->neck.faceBeads.size()) == finiteFaces(*moved, ext),
+                      "R1: one face bead per finite face after the move");
+                phys.EnsureExteriorHoneycombMins(*moved, res.exteriorArcs);
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, ext);
+                    phys2.SetNesting(res.components);
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R1: post-repair on the rewritten diagram goes idle");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R1 two kinks: ") + e.what()).c_str());
+        }
+
+        // -- R1 down to no crossings: kink -> circle --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,-1,2,-2)", 0);
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR1Move(1), "R1 circle: move starts on the kink's monogon");
+            Check(runMove(phys), "R1 circle: loop strips to two beads");
+            R1FaceInfo info;
+            phys.GetR1Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR1(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R1 circle: finalize succeeds");
+            if (moved) {
+                Check(moved->sigma.Cycles().empty() && moved->numEdges == 0,
+                      "R1 circle: no crossings remain");
+                Check(res.components.size() == 1 && res.components[0].kind == MultiloopPart::Circle &&
+                          res.components[0].strand == 0,
+                      "R1 circle: the component is a circle on strand 0");
+                Check(walksOk(*moved, s->neck), "R1 circle: beads form a closed ring");
+                int pads = 0;
+                for (const FaceBead& fb : s->neck.faceBeads) {
+                    if (fb.face < 0 && fb.boundaryBeads.size() >= 3) {
+                        ++pads;
+                    }
+                }
+                Check(pads == 1 && s->neck.faceBeads.size() == 1,
+                      "R1 circle: exactly one circle pad remains");
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, std::unordered_set<int>{});
+                    phys2.SetNesting(res.components);
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R1 circle: post-repair on the circle goes idle");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R1 kink to circle: ") + e.what()).c_str());
+        }
+
+        // -- Connected R2 on a trefoil bigon: 3 crossings -> 1 --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,-3,-6,4)(2,5,-1,-4)(3,-5,-2,6)", 1);
+            R2FaceInfo probe;
+            Check(AnalyzeR2Face(*s->loop, nullptr, 0, &probe) && !probe.disconnects,
+                  "R2 trefoil: face 0 is a connected bigon");
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR2Move(0), "R2 trefoil: move starts");
+            Check(runMove(phys), "R2 trefoil: sides strip and X-Y become tangent");
+            R2FaceInfo info;
+            phys.GetR2Result(&info);
+            {
+                const int xb = info.vertexBead[0];
+                const int yb = info.vertexBead[1];
+                Check(xb >= 0 && yb >= 0 && xb < static_cast<int>(s->neck.beads.size()) &&
+                          yb < static_cast<int>(s->neck.beads.size()),
+                      "R2 trefoil: vertex beads still present after the spoke");
+            }
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R2 trefoil: finalize succeeds");
+            if (moved) {
+                Check(ValidateMultiloopSigma(moved->sigma).empty() && moved->numEdges == 2 &&
+                          moved->sigma.Cycles().size() == 1,
+                      "R2 trefoil: one crossing with compact labels remains");
+                Check(moved->numStrands == 1, "R2 trefoil: strand count preserved");
+                Check(!res.disconnected && res.components.size() == 1,
+                      "R2 trefoil: diagram stays connected");
+                Check(res.faceMap[3] >= 0 && res.faceMap[3] == res.faceMap[4],
+                      "R2 trefoil: the two opposing faces map to one merged face");
+                Check(res.mergeKeepLabel >= 0 && res.mergeDropLabel > res.mergeKeepLabel,
+                      "R2 trefoil: a merge pair keeps the smaller label");
+                Check(linksOk(s->neck), "R2 trefoil: necklace links are consistent");
+                Check(walksOk(*moved, s->neck), "R2 trefoil: every edge walks vertex to vertex");
+                std::unordered_set<int> ext;
+                for (const int f : ExteriorFaceIndices(res.components)) {
+                    ext.insert(f);
+                }
+                Check(static_cast<int>(s->neck.faceBeads.size()) == finiteFaces(*moved, ext) + 1,
+                      "R2 trefoil: merged face briefly holds two beads");
+                phys.EnsureExteriorHoneycombMins(*moved, res.exteriorArcs);
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, ext);
+                    phys2.SetNesting(res.components);
+                    phys2.SetFaceMergePair(res.mergeKeepLabel, res.mergeDropLabel);
+                    Check(phys2.FaceMergePending(), "R2 trefoil: merge pair is pending");
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R2 trefoil: post-repair and face merge finish");
+                Check(static_cast<int>(s->neck.faceBeads.size()) == finiteFaces(*moved, ext),
+                      "R2 trefoil: face bead count drops to one per finite face");
+                bool keeperSurvives = false;
+                for (const FaceBead& fb : s->neck.faceBeads) {
+                    keeperSurvives = keeperSurvives || fb.label == res.mergeKeepLabel;
+                }
+                Check(keeperSurvives, "R2 trefoil: the smaller label survives the merge");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 trefoil: ") + e.what()).c_str());
+        }
+
+        // -- Disconnecting R2 through the exterior: Hopf shadow -> two circles --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,3,-2,4)(2,-3,-1,-4)", 2);
+            R2FaceInfo probe;
+            Check(AnalyzeR2Face(*s->loop, nullptr, 1, &probe) && probe.disconnects &&
+                      probe.faceL == 2,
+                  "R2 Hopf: the lens disconnects through the exterior");
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR2Move(1), "R2 Hopf exterior: move starts");
+            Check(runMove(phys), "R2 Hopf exterior: animation converges");
+            R2FaceInfo info;
+            phys.GetR2Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R2 Hopf exterior: finalize succeeds");
+            if (moved) {
+                Check(moved->sigma.Cycles().empty(), "R2 Hopf exterior: no crossings remain");
+                Check(res.disconnected && res.components.size() == 2 &&
+                          res.components[0].kind == MultiloopPart::Circle &&
+                          res.components[1].kind == MultiloopPart::Circle,
+                      "R2 Hopf exterior: two circle components");
+                Check(!res.components[0].Nested() && !res.components[1].Nested(),
+                      "R2 Hopf exterior: both circles are top level");
+                Check(res.components[0].strand != res.components[1].strand,
+                      "R2 Hopf exterior: circles keep distinct strands");
+                Check(walksOk(*moved, s->neck), "R2 Hopf exterior: both rings close");
+                Check(s->neck.faceBeads.size() == 2, "R2 Hopf exterior: one pad per circle");
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, std::unordered_set<int>{});
+                    phys2.SetNesting(res.components);
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R2 Hopf exterior: post-repair goes idle");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 Hopf exterior: ") + e.what()).c_str());
+        }
+
+        // -- Disconnecting R2 through a finite face: one circle nested in the other --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,3,-2,4)(2,-3,-1,-4)", 2);
+            R2FaceInfo probe;
+            Check(AnalyzeR2Face(*s->loop, nullptr, 0, &probe) && probe.disconnects &&
+                      probe.faceL == 3,
+                  "R2 Hopf nested: the crescent disconnects through a finite face");
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR2Move(0), "R2 Hopf nested: move starts");
+            Check(runMove(phys), "R2 Hopf nested: animation converges");
+            R2FaceInfo info;
+            phys.GetR2Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R2 Hopf nested: finalize succeeds");
+            if (moved) {
+                Check(res.disconnected && res.components.size() == 2,
+                      "R2 Hopf nested: two components");
+                int nestedCount = 0;
+                int outerStrand = -1;
+                int innerStrand = -1;
+                for (const MultiloopComponent& c : res.components) {
+                    if (c.Nested()) {
+                        ++nestedCount;
+                        innerStrand = c.strand;
+                        Check(c.parentCircle >= 0 && c.parentFace < 0,
+                              "R2 Hopf nested: the hole sits inside a circle");
+                    }
+                    else {
+                        outerStrand = c.strand;
+                    }
+                }
+                Check(nestedCount == 1, "R2 Hopf nested: exactly one component is nested");
+                bool parentMatches = false;
+                for (const MultiloopComponent& c : res.components) {
+                    if (c.Nested()) {
+                        parentMatches = c.parentCircle == outerStrand;
+                    }
+                }
+                Check(parentMatches, "R2 Hopf nested: parentCircle is the outer circle's strand");
+                Check(walksOk(*moved, s->neck), "R2 Hopf nested: both rings close");
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, std::unordered_set<int>{});
+                    phys2.SetNesting(res.components);
+                    phys2.Step();
+                    int outerHoles = 0;
+                    for (const FaceBead& fb : s->neck.faceBeads) {
+                        if (fb.face < 0 && !fb.holeBeads.empty()) {
+                            ++outerHoles;
+                        }
+                    }
+                    Check(outerHoles == 1, "R2 Hopf nested: the outer pad lists one hole ring");
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                    for (int i = 0; i < 200; ++i) {
+                        phys2.Step();
+                    }
+                    // Outer pad: inside its ring, outside the hole. Inner pad:
+                    // inside the inner ring. Rings keep a diameter apart.
+                    bool placementOk = true;
+                    for (const FaceBead& fb : s->neck.faceBeads) {
+                        std::vector<Vec2d> poly;
+                        std::vector<std::vector<Vec2d>> h;
+                        if (!phys2.FaceBeadBoundaryPolygon(fb, &poly, &h)) {
+                            placementOk = false;
+                            continue;
+                        }
+                        const Vec2d c{static_cast<double>(fb.pos.x), static_cast<double>(fb.pos.y)};
+                        placementOk = placementOk && PointInPolygonWithHoles(c, poly, h);
+                    }
+                    Check(placementOk, "R2 Hopf nested: pads sit inside their regions and off the hole");
+                    float minRing = 1e9f;
+                    for (const Bead& a : s->neck.beads) {
+                        if (a.removed || a.isVertex || a.strand != outerStrand) {
+                            continue;
+                        }
+                        for (const Bead& b : s->neck.beads) {
+                            if (b.removed || b.isVertex || b.strand != innerStrand) {
+                                continue;
+                            }
+                            const float dx = a.pos.x - b.pos.x;
+                            const float dy = a.pos.y - b.pos.y;
+                            minRing = std::min(minRing, std::sqrt(dx * dx + dy * dy));
+                        }
+                    }
+                    Check(minRing + 0.15f >= 2.0f * s->neck.radius,
+                          "R2 Hopf nested: hole ring and outer ring stay a diameter apart");
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R2 Hopf nested: post-repair goes idle");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 Hopf nested: ") + e.what()).c_str());
+        }
+
+        // -- Disconnecting R2 leaving a crossing component nested in a circle --
+        // Exterior (2,3) is bounded by the circle's arc 2 and the deleted arc
+        // 3, so the circle owns the exterior and the kink ends up inside it.
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,3,-2,-6)(2,-3,-1,4)(5,-5,-4,6)", 3);
+            R2FaceInfo probe;
+            Check(AnalyzeR2Face(*s->loop, nullptr, 1, &probe) && probe.disconnects &&
+                      probe.faceL == 2,
+                  "R2 kinked link: the lens disconnects through the finite 4-gon");
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR2Move(1), "R2 kinked link: move starts");
+            Check(runMove(phys), "R2 kinked link: animation converges");
+            R2FaceInfo info;
+            phys.GetR2Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R2 kinked link: finalize succeeds");
+            if (moved) {
+                Check(ValidateMultiloopSigma(moved->sigma).empty() &&
+                          moved->sigma.Cycles().size() == 1 && moved->numEdges == 2,
+                      "R2 kinked link: the kink survives with compact labels");
+                Check(res.disconnected && res.components.size() == 2,
+                      "R2 kinked link: two components");
+                const MultiloopComponent* circle = nullptr;
+                const MultiloopComponent* kink = nullptr;
+                for (const MultiloopComponent& c : res.components) {
+                    if (c.kind == MultiloopPart::Circle) {
+                        circle = &c;
+                    }
+                    else {
+                        kink = &c;
+                    }
+                }
+                Check(circle != nullptr && kink != nullptr,
+                      "R2 kinked link: one circle and one crossing component");
+                if (circle && kink) {
+                    Check(!circle->Nested(), "R2 kinked link: the circle is top level");
+                    Check(kink->parentCircle == circle->strand && kink->parentFace < 0,
+                          "R2 kinked link: the kink is nested inside the circle");
+                    Check(kink->exteriorFace >= 0 &&
+                              kink->exteriorFace < static_cast<int>(moved->faces.size()),
+                          "R2 kinked link: the nested kink has an exterior face");
+                }
+                Check(linksOk(s->neck) && walksOk(*moved, s->neck),
+                      "R2 kinked link: necklace is consistent");
+                std::unordered_set<int> ext;
+                for (const int f : ExteriorFaceIndices(res.components)) {
+                    ext.insert(f);
+                }
+                bool physicsOk = true;
+                try {
+                    Physics phys2(*moved, s->neck, params, ext);
+                    phys2.SetNesting(res.components);
+                    phys2.Step();
+                    int padsWithHoles = 0;
+                    for (const FaceBead& fb : s->neck.faceBeads) {
+                        if (fb.face < 0 && !fb.holeBeads.empty()) {
+                            ++padsWithHoles;
+                        }
+                    }
+                    Check(padsWithHoles == 1, "R2 kinked link: the circle pad lists the kink as a hole");
+                    phys2.StartPostRepair();
+                    physicsOk = runPost(phys2);
+                }
+                catch (const std::exception&) {
+                    physicsOk = false;
+                }
+                Check(physicsOk, "R2 kinked link: post-repair goes idle");
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 kinked link: ") + e.what()).c_str());
+        }
+
+        // -- Same diagram, exterior (-1,-6,-4): after the move only the kink
+        // bounds it, so the circle nests in a face of the kink --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,3,-2,-6)(2,-3,-1,4)(5,-5,-4,6)", 0);
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            Check(phys.StartR2Move(1), "R2 face hole: move starts");
+            Check(runMove(phys), "R2 face hole: animation converges");
+            R2FaceInfo info;
+            phys.GetR2Result(&info);
+            MoveComponentResult res;
+            std::unique_ptr<Multiloop> moved = FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+            Check(moved != nullptr, "R2 face hole: finalize succeeds");
+            if (moved) {
+                const MultiloopComponent* circle = nullptr;
+                const MultiloopComponent* kink = nullptr;
+                for (const MultiloopComponent& c : res.components) {
+                    if (c.kind == MultiloopPart::Circle) {
+                        circle = &c;
+                    }
+                    else {
+                        kink = &c;
+                    }
+                }
+                Check(circle != nullptr && kink != nullptr && !kink->Nested(),
+                      "R2 face hole: the kink component is top level");
+                std::unordered_set<int> ext;
+                for (const int f : ExteriorFaceIndices(res.components)) {
+                    ext.insert(f);
+                }
+                if (circle && kink) {
+                    Check(circle->parentFace >= 0 && circle->parentCircle < 0 &&
+                              ext.count(circle->parentFace) == 0,
+                          "R2 face hole: the circle sits inside a finite face of the kink");
+                    Physics phys2(*moved, s->neck, params, ext);
+                    phys2.SetNesting(res.components);
+                    phys2.Step();
+                    Check(phys2.FaceHasHoles(circle->parentFace),
+                          "R2 face hole: physics reports the parent face as holed");
+                    Check(!phys2.StartR1Move(circle->parentFace) &&
+                              !phys2.StartR2Move(circle->parentFace) &&
+                              !phys2.StartR3Move(circle->parentFace),
+                          "R2 face hole: moves on a holed face are refused");
+                    int holedBeads = 0;
+                    for (const FaceBead& fb : s->neck.faceBeads) {
+                        if (fb.face == circle->parentFace && !fb.holeBeads.empty()) {
+                            ++holedBeads;
+                        }
+                    }
+                    Check(holedBeads == 1, "R2 face hole: the parent face bead lists the ring");
+                    phys2.StartPostRepair();
+                    Check(runPost(phys2), "R2 face hole: post-repair goes idle");
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 face hole: ") + e.what()).c_str());
+        }
+
+        // -- Two disconnecting R2s: three concentric circles --
+        try {
+            const auto faceWith = [](const Multiloop& loop, int a, int b) {
+                for (int f = 0; f < static_cast<int>(loop.faces.size()); ++f) {
+                    const std::vector<int>& cyc = loop.faces[static_cast<size_t>(f)];
+                    if (cyc.size() == 2 &&
+                        ((cyc[0] == a && cyc[1] == b) || (cyc[0] == b && cyc[1] == a))) {
+                        return f;
+                    }
+                }
+                return -1;
+            };
+            const char* text = "(-1,6,7,8)(1,-8,-7,-4)(-2,4,-3,5)(2,-5,3,-6)";
+            const Multiloop probe(Permutation::FromString(text));
+            const int ext = faceWith(probe, 2, 5);
+            const int firstFace = faceWith(probe, 1, 8);
+            Check(ext >= 0 && firstFace >= 0, "R2 concentric: found exterior (2,5) and bigon (1,8)");
+            std::unique_ptr<Scene> s = buildScene(text, ext);
+            PhysicsParams params;
+            {
+                Physics phys(*s->loop, s->neck, params, s->exteriors);
+                phys.SetNesting(s->comps);
+                phys.Step();
+                Check(phys.StartR2Move(firstFace), "R2 concentric: first move starts");
+                Check(runMove(phys), "R2 concentric: first animation converges");
+                R2FaceInfo info;
+                phys.GetR2Result(&info);
+                MoveComponentResult res;
+                std::unique_ptr<Multiloop> moved =
+                    FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+                Check(moved != nullptr, "R2 concentric: first finalize succeeds");
+                if (moved) {
+                    s->loop = std::move(moved);
+                    s->comps = std::move(res.components);
+                    s->exteriors.clear();
+                    for (const int f : ExteriorFaceIndices(s->comps)) {
+                        s->exteriors.insert(f);
+                    }
+                }
+            }
+            int secondFace = -1;
+            for (int f = 0; f < static_cast<int>(s->loop->faces.size()); ++f) {
+                R2FaceInfo p;
+                if (s->exteriors.count(f) != 0) {
+                    continue;
+                }
+                if (AnalyzeR2Face(*s->loop, nullptr, f, &p) && p.disconnects) {
+                    secondFace = f;
+                    break;
+                }
+            }
+            Check(secondFace >= 0, "R2 concentric: a remaining disconnecting bigon");
+            if (secondFace >= 0) {
+                Physics phys(*s->loop, s->neck, params, s->exteriors);
+                phys.SetNesting(s->comps);
+                phys.Step();
+                Check(phys.StartR2Move(secondFace), "R2 concentric: second move starts");
+                Check(runMove(phys), "R2 concentric: second animation converges");
+                R2FaceInfo info;
+                phys.GetR2Result(&info);
+                MoveComponentResult res;
+                std::unique_ptr<Multiloop> moved =
+                    FinalizeR2(*s->loop, s->neck, info, s->comps, &res);
+                Check(moved != nullptr, "R2 concentric: second finalize succeeds");
+                if (moved) {
+                    s->comps = std::move(res.components);
+                    int circles = 0;
+                    int nested = 0;
+                    const MultiloopComponent* root = nullptr;
+                    const MultiloopComponent* mid = nullptr;
+                    const MultiloopComponent* inn = nullptr;
+                    for (const MultiloopComponent& c : s->comps) {
+                        if (c.kind == MultiloopPart::Circle) {
+                            ++circles;
+                        }
+                        if (c.Nested()) {
+                            ++nested;
+                        }
+                    }
+                    Check(circles == 3 && nested == 2,
+                          "R2 concentric: three circles, two nested");
+                    for (const MultiloopComponent& c : s->comps) {
+                        if (c.kind != MultiloopPart::Circle) {
+                            continue;
+                        }
+                        if (!c.Nested()) {
+                            root = &c;
+                        }
+                    }
+                    if (root != nullptr) {
+                        for (const MultiloopComponent& c : s->comps) {
+                            if (c.kind == MultiloopPart::Circle &&
+                                c.parentCircle == root->strand) {
+                                mid = &c;
+                            }
+                        }
+                    }
+                    if (mid != nullptr) {
+                        for (const MultiloopComponent& c : s->comps) {
+                            if (c.kind == MultiloopPart::Circle &&
+                                c.parentCircle == mid->strand) {
+                                inn = &c;
+                            }
+                        }
+                    }
+                    Check(root != nullptr && mid != nullptr && inn != nullptr,
+                          "R2 concentric: red-in-blue-in-green parent chain");
+                    Physics phys2(*moved, s->neck, params, std::unordered_set<int>{});
+                    phys2.SetNesting(s->comps);
+                    phys2.Step();
+                    int padsWithHoles = 0;
+                    int doubleHoles = 0;
+                    for (const FaceBead& fb : s->neck.faceBeads) {
+                        if (fb.face < 0 && !fb.holeBeads.empty()) {
+                            ++padsWithHoles;
+                            if (fb.holeBeads.size() >= 2) {
+                                ++doubleHoles;
+                            }
+                        }
+                    }
+                    Check(padsWithHoles >= 2 && doubleHoles == 0,
+                          "R2 concentric: each outer pad lists one hole, not two siblings");
+                }
+            }
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 concentric: ") + e.what()).c_str());
+        }
+
+        // -- Cancel restores the erased face bead --
+        try {
+            std::unique_ptr<Scene> s = buildScene("(1,-3,-6,4)(2,5,-1,-4)(3,-5,-2,6)", 1);
+            PhysicsParams params;
+            Physics phys(*s->loop, s->neck, params, s->exteriors);
+            phys.Step();
+            const size_t before = s->neck.faceBeads.size();
+            Check(phys.StartR2Move(0), "R2 cancel: move starts");
+            Check(s->neck.faceBeads.size() + 1 == before, "R2 cancel: face bead erased");
+            for (int i = 0; i < 30 && phys.MoveActive(); ++i) {
+                phys.MoveStep();
+            }
+            phys.CancelMove();
+            Check(!phys.MoveActive() && s->neck.faceBeads.size() == before,
+                  "R2 cancel: face bead restored and move idle");
+            bool haveFace0 = false;
+            for (const FaceBead& fb : s->neck.faceBeads) {
+                haveFace0 = haveFace0 || fb.face == 0;
+            }
+            Check(haveFace0, "R2 cancel: the restored bead is back on its face");
+            phys.Step();
+        }
+        catch (const std::exception& e) {
+            Check(false, (std::string("R2 cancel: ") + e.what()).c_str());
         }
     }
 
