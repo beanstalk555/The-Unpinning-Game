@@ -53,7 +53,7 @@ struct PhysicsParams
     float r3CycleRepelStiffness = 10.8f;
 
     // Displayed frames the R2 vertex spoke runs before the move is performed.
-    int r2SpokeFrames = 20;
+    int r2SpokeFrames = 0;
 
     // In the resting state (no move, auto-tighten or drag), one excess bead
     // is removed from a monogon or circle every this many displayed frames

@@ -8,14 +8,15 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <cstdlib>
 #include <limits>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace
 {
     constexpr float kPiF = 3.14159265358979323846f;
+    constexpr int kMinStrandEdgeBeads = 6;
 
     class ScopedTimer
     {
@@ -302,16 +303,33 @@ void Physics::FlattenSpringsFromEdges()
 
 void Physics::AppendCircleSprings()
 {
+    const auto appendRing = [&](const std::vector<int>& b) {
+        if (b.size() < 2) {
+            return;
+        }
+        for (size_t i = 0; i < b.size(); ++i) {
+            const int a = b[i];
+            const int c = b[(i + 1) % b.size()];
+            if (a < 0 || c < 0 || a >= BeadCount() || c >= BeadCount()) {
+                continue;
+            }
+            if (neck_->beads[static_cast<size_t>(a)].removed ||
+                neck_->beads[static_cast<size_t>(c)].removed) {
+                continue;
+            }
+            springs_.push_back({a, c});
+        }
+    };
     for (FaceBead& fb : neck_->faceBeads) {
         if (fb.face >= 0 || fb.boundaryBeads.size() < 3) {
             continue;
         }
-        const std::vector<int>& b = fb.boundaryBeads;
-        for (size_t i = 0; i < b.size(); ++i) {
-            springs_.push_back({b[i], b[(i + 1) % b.size()]});
-        }
+        appendRing(fb.boundaryBeads);
         fb.RefreshBoundaryDots(*neck_);
         fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
+    }
+    if (r0Active_) {
+        appendRing(r0Pad_.boundaryBeads);
     }
 }
 
@@ -485,6 +503,11 @@ void Physics::SetNesting(const std::vector<MultiloopComponent>& components)
         }
         nesting_.push_back(hole);
     }
+    if (nesting_.empty()) {
+        for (FaceBead& fb : neck_->faceBeads) {
+            fb.holeBeads.clear();
+        }
+    }
     structureDirty_ = true;
 }
 
@@ -495,6 +518,19 @@ bool Physics::FaceHasHoles(int face) const
     }
     for (const NestingHole& hole : nesting_) {
         if (hole.parentFace == face) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Physics::CircleHasHoles(int strand) const
+{
+    if (strand < 0) {
+        return false;
+    }
+    for (const NestingHole& hole : nesting_) {
+        if (hole.parentCircle == strand) {
             return true;
         }
     }
@@ -521,6 +557,9 @@ void Physics::RebuildFaceBodiesFromCache()
         if (!boundary.empty()) {
             faceBodies_.push_back(boundary);
         }
+    }
+    if (r0Active_ && !r0Pad_.boundaryBeads.empty()) {
+        faceBodies_.push_back(r0Pad_.boundaryBeads);
     }
     PruneRemovedFromFaceBodies();
     RebuildHoneycombSpokes();
@@ -691,6 +730,17 @@ void Physics::RefreshFaceBodiesForEdge(int edge)
 {
     std::unordered_set<int> faces;
     AppendIncidentFaces(edge, faces);
+    // Inserts/removes on an exterior-bounding edge must re-walk that
+    // exterior cycle. AppendIncidentFaces skips exterior faces (honeycomb),
+    // so without this the new beads never join the exterior collision group.
+    const auto itPos = faceOfHalfEdge_.find(edge);
+    if (itPos != faceOfHalfEdge_.end() && IsExterior(itPos->second)) {
+        faces.insert(itPos->second);
+    }
+    const auto itNeg = faceOfHalfEdge_.find(-edge);
+    if (itNeg != faceOfHalfEdge_.end() && IsExterior(itNeg->second)) {
+        faces.insert(itNeg->second);
+    }
     for (const int f : faces) {
         WalkFaceBoundaryNoDots(f);
         RefreshFaceBody(f);
@@ -776,16 +826,63 @@ void Physics::RebuildUnknotStructures()
         chains_[static_cast<size_t>(r + 1)] = rings[static_cast<size_t>(r)];
     }
     RebuildSpringsFromChains();
+    std::vector<char> ringUsed(rings.size(), 0);
+    const auto ringStrand = [&](const std::vector<int>& ring) {
+        for (const int bead : ring) {
+            if (bead < 0 || bead >= BeadCount()) {
+                continue;
+            }
+            const Bead& b = neck_->beads[static_cast<size_t>(bead)];
+            if (!b.removed && !b.isVertex) {
+                return b.strand;
+            }
+        }
+        return -1;
+    };
     for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
         FaceBead& fb = neck_->faceBeads[fi];
-        if (fi < rings.size() && rings[fi].size() >= 2) {
-            fb.boundaryBeads.assign(rings[fi].begin(), rings[fi].end() - 1);
+        const int want = PadStrand(fb);
+        int best = -1;
+        int bestScore = -1;
+        for (size_t r = 0; r < rings.size(); ++r) {
+            if (ringUsed[r] != 0 || rings[r].size() < 2) {
+                continue;
+            }
+            int overlap = 0;
+            for (const int bead : fb.boundaryBeads) {
+                if (std::find(rings[r].begin(), rings[r].end(), bead) != rings[r].end()) {
+                    ++overlap;
+                }
+            }
+            int score = overlap;
+            const int rs = ringStrand(rings[r]);
+            if (want >= 0 && rs == want) {
+                score += 1000;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                best = static_cast<int>(r);
+            }
+        }
+        if (best < 0) {
+            for (size_t r = 0; r < rings.size(); ++r) {
+                if (ringUsed[r] == 0 && rings[r].size() >= 2) {
+                    best = static_cast<int>(r);
+                    break;
+                }
+            }
+        }
+        if (best >= 0) {
+            ringUsed[static_cast<size_t>(best)] = 1;
+            const std::vector<int>& ring = rings[static_cast<size_t>(best)];
+            fb.boundaryBeads.assign(ring.begin(), ring.end() - 1);
         }
         fb.RefreshBoundaryDots(*neck_);
         fb.cachedExcessArea = fb.ExcessArea(*neck_, radius_);
     }
     exteriorBoundaries_.clear();
     exteriorFaceOrder_.clear();
+    ResolveHoles();
     RebuildFaceBodiesFromCache();
     structureDirty_ = false;
 }
@@ -883,6 +980,27 @@ void Physics::ApplyFaceCollisions(std::vector<Vector2>& force, int total,
         collisionGrid_.ForEachCandidatePair([&](int a, int b) {
             applyPair(a, b);
         });
+    }
+
+    // R2 strip/pad: the bigon pad is gone, so opposing side interiors are not
+    // in one face group. Collide them with each other (vertices stay out).
+    if (r2Active_ && shortenSub_ != ShortenSub::Spoke) {
+        RebuildMoveRepelSides();
+        std::vector<int> sides;
+        for (const std::vector<int>& side : moveRepelSides_) {
+            sides.insert(sides.end(), side.begin(), side.end());
+        }
+        if (sides.size() >= 2) {
+            collisionGrid_.Clear();
+            collisionGrid_.Reserve(sides.size());
+            for (const int bead : sides) {
+                const Vector2 p = PosOf(bead);
+                collisionGrid_.Insert(bead, p.x, p.y);
+            }
+            collisionGrid_.ForEachCandidatePair([&](int a, int b) {
+                applyPair(a, b);
+            });
+        }
     }
 }
 
@@ -2066,6 +2184,27 @@ double Physics::CircleRingTension(const FaceBead& fb) const
     return (stretch + compression) / beadCount;
 }
 
+float Physics::CircleRingLength(const FaceBead& fb) const
+{
+    const std::vector<int>& ring = fb.boundaryBeads;
+    float length = 0.0f;
+    for (size_t i = 0; i < ring.size(); ++i) {
+        const int a = ring[i];
+        const int c = ring[(i + 1) % ring.size()];
+        if (a < 0 || c < 0 || a >= BeadCount() || c >= BeadCount()) {
+            continue;
+        }
+        if (neck_->beads[static_cast<size_t>(a)].removed ||
+            neck_->beads[static_cast<size_t>(c)].removed) {
+            continue;
+        }
+        const Vector2 pa = PosOf(a);
+        const Vector2 pc = PosOf(c);
+        length += std::sqrt((pc.x - pa.x) * (pc.x - pa.x) + (pc.y - pa.y) * (pc.y - pa.y));
+    }
+    return length;
+}
+
 bool Physics::RemoveCircleExcessIfAllowed(bool oneBead)
 {
     if (unknot_) {
@@ -2329,6 +2468,10 @@ int Physics::RemoveBeadFromEdge(int edge, bool bendPassOnly, int* neighborA, int
     const bool loopEdge = EdgeIsLoop(edge);
     const int minBeads = loopEdge ? 3 : 2;
     if (edgeBeads < minBeads) {
+        return -1;
+    }
+    const int strand = StrandOfEdgeLabel(edge);
+    if (strand >= 0 && StrandLiveEdgeBeadCount(strand) <= kMinStrandEdgeBeads) {
         return -1;
     }
 
@@ -3293,21 +3436,29 @@ void Physics::TryFaceMerge()
 // Face-bead erase / restore for shortening moves
 // ---------------------------------------------------------------------------
 
+bool Physics::EraseFaceBeadAt(size_t fi)
+{
+    if (fi >= neck_->faceBeads.size()) {
+        return false;
+    }
+    erasedFaceBead_ = neck_->faceBeads[fi];
+    erasedFaceBeadIndex_ = fi;
+    erasedFaceBeadValid_ = true;
+    neck_->faceBeads.erase(neck_->faceBeads.begin() + static_cast<long>(fi));
+    if (fi < fvel_.size()) {
+        fvel_.erase(fvel_.begin() + static_cast<long>(fi));
+    }
+    structureDirty_ = true;
+    return true;
+}
+
 bool Physics::EraseFaceBead(int face)
 {
     for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
         if (neck_->faceBeads[fi].face != face) {
             continue;
         }
-        erasedFaceBead_ = neck_->faceBeads[fi];
-        erasedFaceBeadIndex_ = fi;
-        erasedFaceBeadValid_ = true;
-        neck_->faceBeads.erase(neck_->faceBeads.begin() + static_cast<long>(fi));
-        if (fi < fvel_.size()) {
-            fvel_.erase(fvel_.begin() + static_cast<long>(fi));
-        }
-        structureDirty_ = true;
-        return true;
+        return EraseFaceBeadAt(fi);
     }
     return false;
 }
@@ -3343,6 +3494,163 @@ bool Physics::PadEdgeToward(int vertexBead, int halfEdge, int minInteriors)
         if (InsertEdgeBeadBetween(chain[0], chain[1], std::abs(halfEdge)) < 0) {
             return false;
         }
+        structureDirty_ = true;
+    }
+    return false;
+}
+
+int Physics::StrandOfLiveBead(const Bead& b) const
+{
+    if (b.removed || b.isVertex) {
+        return -1;
+    }
+    if (b.edge == 0) {
+        return b.strand;
+    }
+    return StrandOfEdgeLabel(b.edge);
+}
+
+int Physics::StrandOfEdgeLabel(int edge) const
+{
+    if (loop_ == nullptr || edge < 1 ||
+        edge >= static_cast<int>(loop_->strandOfEdge.size())) {
+        return -1;
+    }
+    return loop_->strandOfEdge[static_cast<size_t>(edge)];
+}
+
+int Physics::StrandLiveEdgeBeadCount(int strand) const
+{
+    if (strand < 0) {
+        return 0;
+    }
+    int n = 0;
+    for (int i = 0; i < BeadCount(); ++i) {
+        if (StrandOfLiveBead(neck_->beads[static_cast<size_t>(i)]) == strand) {
+            ++n;
+        }
+    }
+    return n;
+}
+
+int Physics::PickR2ConserveEdge() const
+{
+    std::unordered_set<int> shortStrands;
+    for (const int k : shortenPadEdges_) {
+        const int s = StrandOfEdgeLabel(k);
+        if (s >= 0 && StrandLiveEdgeBeadCount(s) < kMinStrandEdgeBeads) {
+            shortStrands.insert(s);
+        }
+    }
+    std::vector<int> candidates;
+    for (const int k : shortenPadEdges_) {
+        if (shortStrands.empty() ||
+            shortStrands.count(StrandOfEdgeLabel(k)) != 0) {
+            candidates.push_back(k);
+        }
+    }
+    if (candidates.empty()) {
+        candidates = shortenPadEdges_;
+    }
+    int bestEdge = -1;
+    double bestTension = -1.0;
+    for (const int k : candidates) {
+        const double t = EdgeTension(k);
+        if (t > bestTension) {
+            bestTension = t;
+            bestEdge = k;
+        }
+    }
+    return bestEdge;
+}
+
+bool Physics::PadStrandsToMinBeads(int minBeads, const std::vector<int>& avoidEdges)
+{
+    const auto isAvoided = [&](int edge) {
+        return std::find(avoidEdges.begin(), avoidEdges.end(), edge) != avoidEdges.end();
+    };
+    for (int guard = 0; guard < 64; ++guard) {
+        if (structureDirty_) {
+            RebuildStructures();
+        }
+        std::unordered_map<int, int> counts;
+        for (int i = 0; i < BeadCount(); ++i) {
+            const int s = StrandOfLiveBead(neck_->beads[static_cast<size_t>(i)]);
+            if (s >= 0) {
+                ++counts[s];
+            }
+        }
+        int shortStrand = -1;
+        for (const auto& entry : counts) {
+            if (entry.second < minBeads) {
+                shortStrand = entry.first;
+                break;
+            }
+        }
+        if (shortStrand < 0) {
+            return true;
+        }
+
+        int bestAny = -1;
+        int bestPrefer = -1;
+        double tAny = -1.0;
+        double tPrefer = -1.0;
+        if (loop_ != nullptr) {
+            for (int k = 1; k <= loop_->numEdges; ++k) {
+                if (StrandOfEdgeLabel(k) != shortStrand) {
+                    continue;
+                }
+                RefreshEdgeChain(k);
+                const double t = EdgeTension(k);
+                if (t > tAny) {
+                    tAny = t;
+                    bestAny = k;
+                }
+                if (!isAvoided(k) && t > tPrefer) {
+                    tPrefer = t;
+                    bestPrefer = k;
+                }
+            }
+        }
+        const int pick = (bestPrefer >= 0) ? bestPrefer : bestAny;
+        if (pick >= 0) {
+            if (InsertBeadAtFarthestGap(pick) < 0) {
+                return false;
+            }
+            continue;
+        }
+
+        const std::vector<int> ring = RingBeadsOfCircleStrand(shortStrand);
+        if (ring.size() < 2) {
+            return false;
+        }
+        float bestDist = -1.0f;
+        int bestA = -1;
+        int bestC = -1;
+        for (size_t i = 0; i < ring.size(); ++i) {
+            const int a = ring[i];
+            const int c = ring[(i + 1) % ring.size()];
+            if (a < 0 || c < 0 || a >= BeadCount() || c >= BeadCount()) {
+                continue;
+            }
+            if (neck_->beads[static_cast<size_t>(a)].removed ||
+                neck_->beads[static_cast<size_t>(c)].removed) {
+                continue;
+            }
+            const Vector2 pa = PosOf(a);
+            const Vector2 pc = PosOf(c);
+            const float d =
+                std::sqrt((pc.x - pa.x) * (pc.x - pa.x) + (pc.y - pa.y) * (pc.y - pa.y));
+            if (d > bestDist) {
+                bestDist = d;
+                bestA = a;
+                bestC = c;
+            }
+        }
+        if (bestA < 0 || InsertEdgeBeadBetween(bestA, bestC, 0) < 0) {
+            return false;
+        }
+        RefreshCircleStructures();
         structureDirty_ = true;
     }
     return false;
@@ -4184,6 +4492,10 @@ void Physics::EnsureExteriorHoneycombMins(const Multiloop& newLoop, const std::v
 
 void Physics::MoveStep()
 {
+    if (r0Active_) {
+        R0Step();
+        return;
+    }
     if (r1Active_ || r2Active_) {
         ShortenStep();
         return;
@@ -4195,6 +4507,10 @@ void Physics::MoveStep()
 
 void Physics::CancelMove()
 {
+    if (r0Active_) {
+        CancelR0Move();
+        return;
+    }
     if (r1Active_ || r2Active_) {
         CancelShorten();
         return;
@@ -4213,7 +4529,6 @@ void Physics::CancelShorten()
     shortenPadEdges_.clear();
     shortenStallFrames_ = 0;
     spokeFrames_ = 0;
-    r2DidExteriorPad_ = false;
     shortenSub_ = ShortenSub::NeedRemove;
     ClearR3State();
     RestoreErasedFaceBead();
@@ -4231,6 +4546,149 @@ void Physics::GetR2Result(R2FaceInfo* info) const
 {
     if (info != nullptr) {
         *info = r2Info_;
+    }
+}
+
+void Physics::GetR0Result(R0MoveInfo* info) const
+{
+    if (info == nullptr) {
+        return;
+    }
+    info->strand = r0Strand_;
+    info->circleOrdinal = r0CircleOrdinal_;
+    info->ringBeads = r0Pad_.boundaryBeads;
+}
+
+bool Physics::CircleSettleTick()
+{
+    for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
+        Step();
+    }
+    r3SettleFrames_ += params_->autoStepsPerFrame;
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+    RefreshCircleBoundary(r0Pad_);
+    const double threshold =
+        params_->tensionThreshold *
+        std::sqrt(static_cast<double>(std::max(r0SettleLength_, 1.0f)));
+    if (CircleRingTension(r0Pad_) < threshold) {
+        return true;
+    }
+    if (r3SettleFrames_ >= params_->relaxStepsMax) {
+        return true;
+    }
+    return false;
+}
+
+void Physics::CancelR0Move()
+{
+    r0Active_ = false;
+    r0Complete_ = false;
+    r0Pad_ = FaceBead{};
+    r0Strand_ = -1;
+    r0CircleOrdinal_ = -1;
+    r0Sub_ = ShortenSub::NeedRemove;
+    r0StallFrames_ = 0;
+    r0SettleLength_ = 0.0f;
+    ClearR3State();
+    RestoreErasedFaceBead();
+    structureDirty_ = true;
+}
+
+bool Physics::StartR0Move(int faceBeadIndex)
+{
+    if (MoveActive() || autoActive_ || FaceMergePending()) {
+        return false;
+    }
+    if (faceBeadIndex < 0 ||
+        faceBeadIndex >= static_cast<int>(neck_->faceBeads.size())) {
+        return false;
+    }
+    const FaceBead& fb = neck_->faceBeads[static_cast<size_t>(faceBeadIndex)];
+    if (!IsCircleFaceBead(fb) || !fb.holeBeads.empty()) {
+        return false;
+    }
+    const int strand = PadStrand(fb);
+    if (CircleHasHoles(strand)) {
+        return false;
+    }
+    for (const int bead : fb.boundaryBeads) {
+        if (bead < 0 || bead >= BeadCount()) {
+            continue;
+        }
+        if (neck_->beads[static_cast<size_t>(bead)].isVertex) {
+            return false;
+        }
+    }
+    if (LiveBoundaryCount(fb) < 3) {
+        return false;
+    }
+
+    int ordinal = 0;
+    for (int i = 0; i < faceBeadIndex; ++i) {
+        if (IsCircleFaceBead(neck_->faceBeads[static_cast<size_t>(i)])) {
+            ++ordinal;
+        }
+    }
+
+    ClearR3State();
+    r0Pad_ = fb;
+    r0Strand_ = strand;
+    r0CircleOrdinal_ = ordinal;
+    r0Active_ = true;
+    r0Complete_ = false;
+    r0Sub_ = ShortenSub::NeedRemove;
+    r0StallFrames_ = 0;
+    r0SettleLength_ = 0.0f;
+    if (!EraseFaceBeadAt(static_cast<size_t>(faceBeadIndex))) {
+        r0Active_ = false;
+        r0Pad_ = FaceBead{};
+        return false;
+    }
+    RefreshCircleBoundary(r0Pad_);
+    structureDirty_ = true;
+    RebuildStructures();
+    return true;
+}
+
+void Physics::R0Step()
+{
+    if (!r0Active_ || r0Complete_) {
+        return;
+    }
+    if (++r0StallFrames_ > 4000) {
+        CancelR0Move();
+        return;
+    }
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    if (r0Sub_ == ShortenSub::NeedRemove) {
+        RefreshCircleBoundary(r0Pad_);
+        if (LiveBoundaryCount(r0Pad_) <= 3) {
+            r0Complete_ = true;
+            return;
+        }
+        const int bead = FarthestLiveBoundaryBead(r0Pad_);
+        if (bead < 0) {
+            CancelR0Move();
+            return;
+        }
+        r0SettleLength_ = CircleRingLength(r0Pad_);
+        RemoveEdgeBead(bead);
+        RefreshCircleBoundary(r0Pad_);
+        r3SettleFrames_ = 0;
+        r0Sub_ = ShortenSub::SettlingRemove;
+        structureDirty_ = true;
+        return;
+    }
+
+    if (r0Sub_ == ShortenSub::SettlingRemove) {
+        if (CircleSettleTick()) {
+            r0Sub_ = ShortenSub::NeedRemove;
+        }
     }
 }
 
@@ -4340,6 +4798,39 @@ bool Physics::StartR2Move(int face)
         !padExterior(info.vertexBead[1], info.ap) || !padExterior(info.vertexBead[1], info.bp)) {
         return false;
     }
+    if (info.disconnects && !IsExterior(info.faceL)) {
+        int ext = -1;
+        for (const int f : exteriorFaceOrder_) {
+            bool hit = false;
+            for (const int h : loop_->faces[static_cast<size_t>(f)]) {
+                const int k = std::abs(h);
+                if (k == std::abs(info.a) || k == std::abs(info.b) || k == std::abs(info.ap) ||
+                    k == std::abs(info.bp)) {
+                    hit = true;
+                    break;
+                }
+            }
+            if (hit) {
+                ext = f;
+                break;
+            }
+        }
+        if (ext < 0 && !exteriorFaceOrder_.empty()) {
+            ext = exteriorFaceOrder_[0];
+        }
+        const int opp = R2OpposingHostHalfEdge(*loop_, info, ext);
+        if (opp != 0) {
+            const int vb = (opp == info.a || opp == info.b) ? info.vertexBead[0]
+                                                            : info.vertexBead[1];
+            if (!PadEdgeToward(vb, opp, 3)) {
+                return false;
+            }
+        }
+    }
+    {
+        const std::vector<int> strip = {std::abs(info.h0), std::abs(info.h1)};
+        PadStrandsToMinBeads(kMinStrandEdgeBeads, strip);
+    }
     if (!AnalyzeR2Face(*loop_, neck_, face, &info)) {
         return false;
     }
@@ -4363,7 +4854,6 @@ bool Physics::StartR2Move(int face)
     }
     shortenStallFrames_ = 0;
     spokeFrames_ = 0;
-    r2DidExteriorPad_ = false;
     EraseFaceBead(face);
     structureDirty_ = true;
     RebuildStructures();
@@ -4407,11 +4897,6 @@ void Physics::ShortenStep()
                 r1Complete_ = true;
                 return;
             }
-            if (!shortenPadEdges_.empty() && !r2DidExteriorPad_) {
-                r2DidExteriorPad_ = true;
-                shortenSub_ = ShortenSub::NeedInsert;
-                return;
-            }
             shortenSub_ = ShortenSub::Spoke;
             spokeFrames_ = 0;
             return;
@@ -4429,12 +4914,8 @@ void Physics::ShortenStep()
 
     if (shortenSub_ == ShortenSub::SettlingRemove) {
         if (R3SettleTick(r3SettleEdge_, r3SettleLength_)) {
-            // R2: do not pad exteriors between side-bead removals. That
-            // tension-threshold loop can keep inserting and drag the
-            // diagram off-screen. One pad pass runs after both sides are
-            // stripped (see NeedRemove).
-            shortenSub_ = (r2Active_ || shortenPadEdges_.empty()) ? ShortenSub::NeedRemove
-                                                                  : ShortenSub::NeedInsert;
+            shortenSub_ = shortenPadEdges_.empty() ? ShortenSub::NeedRemove
+                                                   : ShortenSub::NeedInsert;
         }
         return;
     }
@@ -4445,11 +4926,19 @@ void Physics::ShortenStep()
         }
         int bestEdge = -1;
         double bestTension = -1.0;
-        for (const int k : shortenPadEdges_) {
-            const double t = EdgeTension(k);
-            if (t > bestTension) {
-                bestTension = t;
-                bestEdge = k;
+        if (r2Active_) {
+            bestEdge = PickR2ConserveEdge();
+            if (bestEdge >= 0) {
+                bestTension = EdgeTension(bestEdge);
+            }
+        }
+        else {
+            for (const int k : shortenPadEdges_) {
+                const double t = EdgeTension(k);
+                if (t > bestTension) {
+                    bestTension = t;
+                    bestEdge = k;
+                }
             }
         }
         if (bestEdge < 0) {
@@ -4457,11 +4946,13 @@ void Physics::ShortenStep()
             return;
         }
         const float length = EdgeChainLength(bestEdge);
-        const double threshold =
-            params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
-        if (bestTension < threshold) {
-            shortenSub_ = ShortenSub::NeedRemove;
-            return;
+        if (!r2Active_) {
+            const double threshold =
+                params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
+            if (bestTension < threshold) {
+                shortenSub_ = ShortenSub::NeedRemove;
+                return;
+            }
         }
         r3SettleLength_ = length;
         if (InsertBeadAtFarthestGap(bestEdge) < 0) {

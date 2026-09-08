@@ -24,6 +24,7 @@
 #include "physics_params.h"
 #include "physics_tuning.h"
 #include "move_rewrite.h"
+#include "r0_move.h"
 #include "r1_move.h"
 #include "r2_move.h"
 #include "r3_move.h"
@@ -576,6 +577,7 @@ namespace
             std::vector<MultiloopComponent> components;
             GridLayout layout;
             Necklace necklace;
+            bool unknotMode = false;
             int selectedFace = -1;
             float viewCell = 1.0f;
             float viewLookX = 0.0f;
@@ -588,14 +590,17 @@ namespace
 
         void PushR3Undo()
         {
-            if (!loop || !layout || !necklace) {
+            if (!layout || !necklace) {
                 return;
             }
             R3UndoSnapshot snap;
-            snap.loop.reset(new Multiloop(*loop));
+            if (loop) {
+                snap.loop.reset(new Multiloop(*loop));
+            }
             snap.components = components;
             snap.layout = *layout;
             snap.necklace = *necklace;
+            snap.unknotMode = unknotMode;
             snap.selectedFace = selectedFace;
             snap.viewCell = viewCell;
             snap.viewLookX = viewLookX;
@@ -617,7 +622,7 @@ namespace
             }
             R3UndoSnapshot snap = std::move(r3Undo.back());
             r3Undo.pop_back();
-            if (!snap.loop) {
+            if (!snap.unknotMode && !snap.loop) {
                 return;
             }
             physics.reset();
@@ -625,6 +630,7 @@ namespace
             components = std::move(snap.components);
             layout.reset(new GridLayout(std::move(snap.layout)));
             necklace.reset(new Necklace(std::move(snap.necklace)));
+            unknotMode = snap.unknotMode;
             selectedFace = snap.selectedFace;
             debugFaceBeadIndex = -1;
             dropdownOpen = false;
@@ -632,8 +638,15 @@ namespace
             wasAutoTightening = false;
             wasR3Active = false;
             faceLabels.clear();
-            for (const std::vector<int>& face : loop->faces) {
-                faceLabels.push_back(CycleToString(face));
+            if (unknotMode) {
+                if (CircleCount() <= 1) {
+                    faceLabels = {"()", "()'"};
+                }
+            }
+            else if (loop) {
+                for (const std::vector<int>& face : loop->faces) {
+                    faceLabels.push_back(CycleToString(face));
+                }
             }
             SyncSigmaText();
             viewLayoutKey = layout.get();
@@ -644,8 +657,15 @@ namespace
             viewGridHeight = snap.viewGridHeight;
             viewAnimating = false;
             try {
-                physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
-                physics->SetNesting(components);
+                if (unknotMode) {
+                    physics.reset(new Physics(*necklace, physicsParams));
+                }
+                else if (loop) {
+                    physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
+                }
+                if (physics) {
+                    physics->SetNesting(components);
+                }
             }
             catch (const std::exception& e) {
                 physics.reset();
@@ -1020,6 +1040,20 @@ namespace
             return false;
         }
 
+        // True when some component sits inside the circle of `strand`.
+        bool CircleHasNested(int strand) const
+        {
+            if (strand < 0) {
+                return false;
+            }
+            for (const MultiloopComponent& component : components) {
+                if (component.parentCircle == strand) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // Face of `newLoop` sharing the most half-edges with `oldFace` of
         // `oldLoop` (labels unchanged, as after an R3). -1 if none.
         static int RemapFaceByOverlap(const Multiloop& oldLoop, const Multiloop& newLoop,
@@ -1125,6 +1159,85 @@ namespace
                 return;
             }
             CompleteShorteningMove(std::move(newLoop), result);
+        }
+
+        // Empty canvas after the last circle pops. Leaves the undo stack intact.
+        void ClearDiagramKeepUndo()
+        {
+            loop.reset();
+            components.clear();
+            unknotMode = false;
+            necklace.reset();
+            physics.reset();
+            layout.reset();
+            faceLabels.clear();
+            selectedFace = -1;
+            sigmaBox.text.clear();
+            sigmaBox.caret = 0;
+            sigmaBox.anchor = 0;
+            sigmaBox.scrollX = 0.0f;
+            debugFaceBeadIndex = -1;
+            error.clear();
+            dropdownOpen = false;
+            wasAutoTightening = false;
+            wasR3Active = false;
+        }
+
+        void RefreshUnknotLabels()
+        {
+            if (CircleCount() <= 1) {
+                faceLabels = {"()", "()'"};
+                selectedFace = 0;
+            }
+            else {
+                faceLabels.clear();
+                selectedFace = -1;
+            }
+        }
+
+        void CompleteR0Move()
+        {
+            if (!physics || !necklace) {
+                return;
+            }
+            R0MoveInfo info;
+            physics->GetR0Result(&info);
+            if (!FinalizeR0(*necklace, info, &components)) {
+                physics->CancelMove();
+                return;
+            }
+            physics.reset();
+            debugFaceBeadIndex = -1;
+            if (components.empty()) {
+                ClearDiagramKeepUndo();
+                return;
+            }
+            SyncSigmaText();
+            bool allCircles = true;
+            for (const MultiloopComponent& component : components) {
+                if (component.kind != MultiloopPart::Circle) {
+                    allCircles = false;
+                    break;
+                }
+            }
+            try {
+                if (unknotMode || !loop || allCircles || loop->numEdges == 0) {
+                    physics.reset(new Physics(*necklace, physicsParams));
+                    physics->SetNesting(components);
+                    unknotMode = true;
+                    loop.reset();
+                    RefreshUnknotLabels();
+                }
+                else {
+                    physics.reset(new Physics(*loop, *necklace, physicsParams, PhysicsExteriors()));
+                    physics->SetNesting(components);
+                    physics->StartPostRepair();
+                }
+            }
+            catch (const std::exception& e) {
+                physics.reset();
+                error = e.what();
+            }
         }
 
         void SelectFaceContaining(int halfEdge)
@@ -2339,26 +2452,50 @@ namespace
                                 app.debugFaceBeadIndex = clickedFaceBead;
                                 app.physics->PrintShoelaceDebug(fb.face);
                             }
-                            // A click on a 1-, 2- or 3-gon region starts the
-                            // matching Reidemeister move (regions holding
-                            // nested components are left alone).
-                            const size_t degree = fb.phiCycle.size();
-                            if (fb.face >= 0 && degree >= 1 && degree <= 3 &&
-                                !app.unknotMode && !app.physics->AutoTightening() &&
-                                !app.physics->MoveActive() && !app.FaceHasNested(fb.face)) {
+                            const bool idle = !app.physics->AutoTightening() &&
+                                              !app.physics->MoveActive();
+                            int padStrand = -1;
+                            for (const int bead : fb.boundaryBeads) {
+                                if (bead < 0 ||
+                                    bead >= static_cast<int>(app.necklace->beads.size())) {
+                                    continue;
+                                }
+                                const Bead& b = app.necklace->beads[static_cast<size_t>(bead)];
+                                if (!b.removed && !b.isVertex) {
+                                    padStrand = b.strand;
+                                    break;
+                                }
+                            }
+                            const bool circlePad = app.unknotMode || fb.face < 0;
+                            if (circlePad && idle && fb.holeBeads.empty() &&
+                                !app.CircleHasNested(padStrand)) {
                                 app.PushR3Undo();
-                                bool started = false;
-                                if (degree == 1) {
-                                    started = app.physics->StartR1Move(fb.face);
-                                }
-                                else if (degree == 2) {
-                                    started = app.physics->StartR2Move(fb.face);
-                                }
-                                else {
-                                    started = app.physics->StartR3Move(fb.face);
-                                }
-                                if (!started && !app.r3Undo.empty()) {
+                                if (!app.physics->StartR0Move(clickedFaceBead) &&
+                                    !app.r3Undo.empty()) {
                                     app.r3Undo.pop_back();
+                                }
+                            }
+                            else {
+                                // A click on a 1-, 2- or 3-gon region starts the
+                                // matching Reidemeister move (regions holding
+                                // nested components are left alone).
+                                const size_t degree = fb.phiCycle.size();
+                                if (fb.face >= 0 && degree >= 1 && degree <= 3 &&
+                                    !app.unknotMode && idle && !app.FaceHasNested(fb.face)) {
+                                    app.PushR3Undo();
+                                    bool started = false;
+                                    if (degree == 1) {
+                                        started = app.physics->StartR1Move(fb.face);
+                                    }
+                                    else if (degree == 2) {
+                                        started = app.physics->StartR2Move(fb.face);
+                                    }
+                                    else {
+                                        started = app.physics->StartR3Move(fb.face);
+                                    }
+                                    if (!started && !app.r3Undo.empty()) {
+                                        app.r3Undo.pop_back();
+                                    }
                                 }
                             }
                         }
@@ -2372,7 +2509,10 @@ namespace
                 const auto physicsT0 = std::chrono::high_resolution_clock::now();
                 if (app.physics->MoveActive()) {
                     app.physics->MoveStep();
-                    if (app.physics->R1Complete()) {
+                    if (app.physics->R0Complete()) {
+                        app.CompleteR0Move();
+                    }
+                    else if (app.physics->R1Complete()) {
                         app.CompleteR1Move();
                     }
                     else if (app.physics->R2Complete()) {
@@ -2405,7 +2545,9 @@ namespace
                     app.physics->SetDebugFrameTotalMs(frameMs);
                 }
             }
-            DrawLayout(app, view);
+            if (app.necklace && app.layout) {
+                DrawLayout(app, view);
+            }
 
             if (app.debug && app.physics && app.necklace) {
                 const float fontSize = 15.0f;

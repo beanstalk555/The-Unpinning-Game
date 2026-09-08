@@ -11,6 +11,7 @@
 #include "beads.h"
 #include "multiloop.h"
 #include "physics_params.h"
+#include "r0_move.h"
 #include "r1_move.h"
 #include "r2_move.h"
 #include "r3_move.h"
@@ -119,22 +120,28 @@ public:
     void StartPostRepair();
     void StartR3PostRepair() { StartPostRepair(); }
 
-    // ---- Reidemeister 1 / 2 (shortening) ----
+    // ---- Reidemeister 0 / 1 / 2 (shortening) ----
+    // R0: erases a circle's face bead, strips the ring to three edge beads.
+    bool StartR0Move(int faceBeadIndex);
+    bool R0Active() const { return r0Active_; }
+    bool R0Complete() const { return r0Complete_; }
+    void GetR0Result(R0MoveInfo* info) const;
     // R1: erases the monogon's face bead, strips the loop to two edge beads.
     bool StartR1Move(int face);
     bool R1Active() const { return r1Active_; }
     bool R1Complete() const { return r1Complete_; }
     void GetR1Result(R1FaceInfo* info) const;
     // R2: erases the bigon's face bead, strips each side to one bead while
-    // padding tense exterior arcs, then pulls X and Y tangent with a spoke.
+    // conserving beads onto the tensest exterior arc, then pulls X and Y
+    // tangent with a spoke.
     bool StartR2Move(int face);
     bool R2Active() const { return r2Active_; }
     bool R2Complete() const { return r2Complete_; }
     void GetR2Result(R2FaceInfo* info) const;
 
-    // Any Reidemeister animation (R1, R2, R3 or post-repair) in progress.
-    bool MoveActive() const { return r1Active_ || r2Active_ || r3Active_; }
-    bool MoveComplete() const { return r1Complete_ || r2Complete_ || r3Complete_; }
+    // Any Reidemeister animation (R0, R1, R2, R3 or post-repair) in progress.
+    bool MoveActive() const { return r0Active_ || r1Active_ || r2Active_ || r3Active_; }
+    bool MoveComplete() const { return r0Complete_ || r1Complete_ || r2Complete_ || r3Complete_; }
     // Advance whichever move is active by one displayed frame.
     void MoveStep();
     // Abandon the active move (restores cuts and the erased face bead).
@@ -356,6 +363,11 @@ private:
     // Insert beads next to vertexBead along halfEdge until the edge has at
     // least minInteriors interior beads.
     bool PadEdgeToward(int vertexBead, int halfEdge, int minInteriors);
+    int StrandOfLiveBead(const Bead& b) const;
+    int StrandOfEdgeLabel(int edge) const;
+    int StrandLiveEdgeBeadCount(int strand) const;
+    bool PadStrandsToMinBeads(int minBeads, const std::vector<int>& avoidEdges);
+    int PickR2ConserveEdge() const;
     // True when removing from edge would strip a neighbor face that is already
     // at the honeycomb floor (≤6 boundary beads). The clicked R3 face is ignored.
     bool NeighborHoneycombBlocksRemoval(int edge);
@@ -400,7 +412,13 @@ private:
     void CancelShorten();
     Vector2 ShortenCenter() const;
     bool EraseFaceBead(int face);
+    bool EraseFaceBeadAt(size_t fi);
     void RestoreErasedFaceBead();
+    void R0Step();
+    void CancelR0Move();
+    bool CircleSettleTick();
+    float CircleRingLength(const FaceBead& fb) const;
+    bool CircleHasHoles(int strand) const;
     void TryFaceMerge();
     void ResolveHoles();
     int PadStrand(const FaceBead& fb) const;
@@ -409,10 +427,18 @@ private:
     // Minimum boundary bead count of a region with holes (0 without holes).
     int HoleFloor(const FaceBead& fb) const;
 
+    bool r0Active_ = false;
+    bool r0Complete_ = false;
     bool r1Active_ = false;
     bool r1Complete_ = false;
     bool r2Active_ = false;
     bool r2Complete_ = false;
+    FaceBead r0Pad_;
+    int r0Strand_ = -1;
+    int r0CircleOrdinal_ = -1;
+    ShortenSub r0Sub_ = ShortenSub::NeedRemove;
+    int r0StallFrames_ = 0;
+    float r0SettleLength_ = 0.0f;
     R1FaceInfo r1Info_;
     R2FaceInfo r2Info_;
     ShortenSub shortenSub_ = ShortenSub::NeedRemove;
@@ -421,7 +447,6 @@ private:
     std::vector<int> shortenPadEdges_;
     int shortenStallFrames_ = 0;
     int spokeFrames_ = 0;
-    bool r2DidExteriorPad_ = false;
     bool erasedFaceBeadValid_ = false;
     FaceBead erasedFaceBead_;
     size_t erasedFaceBeadIndex_ = 0;

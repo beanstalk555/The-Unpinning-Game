@@ -144,6 +144,35 @@ bool AnalyzeR2Face(const Multiloop& loop, const Necklace* neck, int face, R2Face
     return true;
 }
 
+int R2OpposingHostHalfEdge(const Multiloop& loop, const R2FaceInfo& info, int exteriorFace)
+{
+    if (!info.disconnects || info.faceL < 0 || exteriorFace == info.faceL) {
+        return 0;
+    }
+    if (exteriorFace < 0 || exteriorFace >= static_cast<int>(loop.faces.size())) {
+        return 0;
+    }
+    bool outerIsS1 = false;
+    bool found = false;
+    for (const int h : loop.faces[static_cast<size_t>(exteriorFace)]) {
+        const int k = std::abs(h);
+        if (k == std::abs(info.a) || k == std::abs(info.bp)) {
+            outerIsS1 = true;
+            found = true;
+            break;
+        }
+        if (k == std::abs(info.b) || k == std::abs(info.ap)) {
+            outerIsS1 = false;
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
+        return 0;
+    }
+    return outerIsS1 ? info.a : info.ap;
+}
+
 std::unique_ptr<Multiloop> FinalizeR2(const Multiloop& oldLoop, Necklace& neck,
                                       const R2FaceInfo& info,
                                       const std::vector<MultiloopComponent>& oldComponents,

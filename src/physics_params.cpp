@@ -21,6 +21,6 @@ void PhysicsParams::ResetDefaults()
     honeycombFortifyStiffness = 500.0f;
     r3FaceBeadMass = 10.0f;
     r3CycleRepelStiffness = 10.8f;
-    r2SpokeFrames = 20;
+    r2SpokeFrames = 0;
     passiveTightenInterval = 10;
 }

@@ -47,6 +47,11 @@ struct R2FaceInfo
 // (false if the four terminals are not distinct edge beads).
 bool AnalyzeR2Face(const Multiloop& loop, const Necklace* neck, int face, R2FaceInfo* out);
 
+// When a disconnecting R2 nests an unloop in finite face L, the opposing
+// host-face half-edge (the outer strand's XY-arc on L). 0 if the move does
+// not nest through a finite face, or if `exteriorFace` is L itself.
+int R2OpposingHostHalfEdge(const Multiloop& loop, const R2FaceInfo& info, int exteriorFace);
+
 // Performs the move once each bigon side holds exactly one interior bead
 // (m0 on |h0|, m1 on |h1|) and X, Y have been drawn tangent. New chains:
 // aT - X - m1 - b'T and bT - m0 - Y - a'T. Face beads, nesting and the

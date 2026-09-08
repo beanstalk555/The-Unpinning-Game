@@ -45,3 +45,13 @@ make RAYLIB_PATH=C:/path/to/raylib
 ```
 
 Close any running copy of the app before rebuilding.
+
+### AI Disclosure
+
+The codebase for this prototype was mostly AI-generated using Cursor (Pro plan). The models used include:
+
+-Composer 2
+-Composer 2.5
+-Cursor Grok 4.6
+-Claude Fable 5
+-Claude Fable 5.1
