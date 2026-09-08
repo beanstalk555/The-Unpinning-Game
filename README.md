@@ -50,8 +50,8 @@ Close any running copy of the app before rebuilding.
 
 The codebase for this prototype was mostly AI-generated using Cursor (Pro plan). The models used include:
 
--Composer 2
--Composer 2.5
--Cursor Grok 4.6
--Claude Fable 5
--Claude Fable 5.1
+- Composer 2
+- Composer 2.5
+- Cursor Grok 4.6
+- Claude Fable 5
+- Claude Fable 5.1
