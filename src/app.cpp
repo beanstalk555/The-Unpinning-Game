@@ -1,11 +1,11 @@
 #include "app.h"
 
 #include <raylib.h>
+#include <rlgl.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <cstdio>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -17,6 +17,7 @@
 
 #include "beads.h"
 #include "drawing.h"
+#include "geometry.h"
 #include "multiloop.h"
 #include "orthogonal.h"
 #include "permutation.h"
@@ -37,6 +38,7 @@ namespace
         "(4,9,-5,-10)(18,13,-1,-14)(5,14,-6,-15)(10,15,-11,-16)";
 
     const Color kBackground = {245, 245, 248, 255};
+    const Color kHighlightFill = {255, 220, 40, 90};
     const Color kTextDark = {40, 42, 48, 255};
     const Color kTextDim = {130, 132, 140, 255};
     const Color kAccent = {70, 110, 230, 255};
@@ -534,6 +536,7 @@ namespace
         std::vector<MultiloopComponent> components;
         std::vector<std::string> faceLabels;
         int selectedFace = -1;
+        bool exteriorHighlighted = false;
         std::unique_ptr<GridLayout> layout;
         std::unique_ptr<Necklace> necklace;
         std::unique_ptr<Physics> physics;
@@ -579,6 +582,7 @@ namespace
             Necklace necklace;
             bool unknotMode = false;
             int selectedFace = -1;
+            bool exteriorHighlighted = false;
             float viewCell = 1.0f;
             float viewLookX = 0.0f;
             float viewLookY = 0.0f;
@@ -602,6 +606,7 @@ namespace
             snap.necklace = *necklace;
             snap.unknotMode = unknotMode;
             snap.selectedFace = selectedFace;
+            snap.exteriorHighlighted = exteriorHighlighted;
             snap.viewCell = viewCell;
             snap.viewLookX = viewLookX;
             snap.viewLookY = viewLookY;
@@ -632,6 +637,7 @@ namespace
             necklace.reset(new Necklace(std::move(snap.necklace)));
             unknotMode = snap.unknotMode;
             selectedFace = snap.selectedFace;
+            exteriorHighlighted = snap.exteriorHighlighted;
             debugFaceBeadIndex = -1;
             dropdownOpen = false;
             error.clear();
@@ -707,6 +713,83 @@ namespace
             return faces;
         }
 
+        struct HighlightSnapshot
+        {
+            std::unordered_map<int, bool> byFace;
+            std::unordered_map<int, bool> byCircle;
+            bool exterior = false;
+        };
+
+        static int CirclePadStrand(const Necklace& neck, const FaceBead& fb)
+        {
+            for (const int bead : fb.boundaryBeads) {
+                if (bead >= 0 && bead < static_cast<int>(neck.beads.size()) &&
+                    !neck.beads[static_cast<size_t>(bead)].removed) {
+                    return neck.beads[static_cast<size_t>(bead)].strand;
+                }
+            }
+            return -1;
+        }
+
+        HighlightSnapshot CaptureHighlights() const
+        {
+            HighlightSnapshot snap;
+            snap.exterior = exteriorHighlighted;
+            if (!necklace) {
+                return snap;
+            }
+            for (const FaceBead& fb : necklace->faceBeads) {
+                if (fb.face >= 0) {
+                    snap.byFace[fb.face] = snap.byFace[fb.face] || fb.highlighted;
+                }
+                else {
+                    const int strand = CirclePadStrand(*necklace, fb);
+                    if (strand >= 0) {
+                        snap.byCircle[strand] = snap.byCircle[strand] || fb.highlighted;
+                    }
+                }
+            }
+            return snap;
+        }
+
+        void RestoreHighlights(const HighlightSnapshot& snap, const std::unordered_set<int>& oldExt,
+                               const std::unordered_set<int>& newExt)
+        {
+            if (necklace) {
+                for (FaceBead& fb : necklace->faceBeads) {
+                    fb.highlighted = false;
+                    if (fb.face >= 0) {
+                        const auto it = snap.byFace.find(fb.face);
+                        if (it != snap.byFace.end() && it->second) {
+                            fb.highlighted = true;
+                        }
+                        if (oldExt.count(fb.face) != 0 && snap.exterior) {
+                            fb.highlighted = true;
+                        }
+                    }
+                    else {
+                        const int strand = CirclePadStrand(*necklace, fb);
+                        const auto it = snap.byCircle.find(strand);
+                        if (strand >= 0 && it != snap.byCircle.end() && it->second) {
+                            fb.highlighted = true;
+                        }
+                    }
+                }
+            }
+            bool newExtWasFiniteHighlight = false;
+            bool newExtWasOldExt = false;
+            for (const int f : newExt) {
+                const auto it = snap.byFace.find(f);
+                if (it != snap.byFace.end() && it->second) {
+                    newExtWasFiniteHighlight = true;
+                }
+                if (oldExt.count(f) != 0) {
+                    newExtWasOldExt = true;
+                }
+            }
+            exteriorHighlighted = newExtWasFiniteHighlight || (newExtWasOldExt && snap.exterior);
+        }
+
         int CircleCount() const
         {
             int n = 0;
@@ -757,6 +840,7 @@ namespace
             necklace.reset();
             physics.reset();
             error.clear();
+            exteriorHighlighted = false;
             // Packing side by side un-nests every component.
             ClearNesting(components);
             try {
@@ -797,6 +881,7 @@ namespace
                 necklace.reset(new Necklace(BuildUnknotNecklace()));
                 faceLabels = {"()", "()'"};
                 selectedFace = 0;
+                exteriorHighlighted = false;
                 sigmaBox.text = "()";
                 sigmaBox.caret = 0;
                 sigmaBox.anchor = 0;
@@ -895,13 +980,16 @@ namespace
 
         void SelectFace(int index)
         {
-            selectedFace = index;
             if (unknotMode) {
+                selectedFace = index;
                 return; // both faces give the same picture
             }
             if (!loop || index < 0 || index >= static_cast<int>(loop->faces.size())) {
                 return;
             }
+            const HighlightSnapshot snap = CaptureHighlights();
+            const std::unordered_set<int> oldExt = PhysicsExteriors();
+            selectedFace = index;
             for (MultiloopComponent& component : components) {
                 if (ComponentOwnsFace(component, *loop, index)) {
                     component.exteriorFace = index;
@@ -910,6 +998,7 @@ namespace
             }
             ClearR3Undo();
             RebuildPacked();
+            RestoreHighlights(snap, oldExt, PhysicsExteriors());
         }
 
         void ResetToGrid()
@@ -919,6 +1008,8 @@ namespace
                     physics->StopAutoTighten();
                 }
                 debugFaceBeadIndex = -1;
+                const HighlightSnapshot snap = CaptureHighlights();
+                const std::unordered_set<int> oldExt = PhysicsExteriors();
                 if (CircleCount() <= 1) {
                     necklace.reset(new Necklace(BuildUnknotNecklace()));
                     physics.reset();
@@ -929,9 +1020,11 @@ namespace
                         physics.reset();
                         error = e.what();
                     }
+                    RestoreHighlights(snap, oldExt, PhysicsExteriors());
                     return;
                 }
                 RebuildPacked();
+                RestoreHighlights(snap, oldExt, PhysicsExteriors());
                 return;
             }
             if (!loop) {
@@ -943,6 +1036,8 @@ namespace
             debugFaceBeadIndex = -1;
 
             std::unordered_map<int, int> labelByFace;
+            const HighlightSnapshot snap = CaptureHighlights();
+            const std::unordered_set<int> oldExt = PhysicsExteriors();
             if (necklace) {
                 for (const FaceBead& fb : necklace->faceBeads) {
                     if (fb.face >= 0 && fb.label > 0) {
@@ -961,6 +1056,7 @@ namespace
                     }
                 }
             }
+            RestoreHighlights(snap, oldExt, PhysicsExteriors());
         }
 
         // Swap in the rewritten multiloop once the R3 slide has converged.
@@ -1827,7 +1923,39 @@ namespace
         return view;
     }
 
-    void DrawLayout(const App& app, const View& view)
+    void FillPolygonScreen(const std::vector<Vector2>& pts, Color color)
+    {
+        if (pts.size() < 3) {
+            return;
+        }
+        std::vector<Vec2d> verts;
+        verts.reserve(pts.size());
+        for (const Vector2& p : pts) {
+            verts.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+        }
+        std::vector<int> tris;
+        if (!EarClipTriangles(verts, &tris)) {
+            return;
+        }
+        // Raylib DrawTriangle is batched. Culling must stay off until the
+        // batch is flushed, or the GPU still drops clockwise screen triangles.
+        rlDisableBackfaceCulling();
+        rlBegin(RL_TRIANGLES);
+        rlColor4ub(color.r, color.g, color.b, color.a);
+        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+            const Vector2 a = pts[static_cast<size_t>(tris[i])];
+            const Vector2 b = pts[static_cast<size_t>(tris[i + 1])];
+            const Vector2 c = pts[static_cast<size_t>(tris[i + 2])];
+            rlVertex2f(a.x, a.y);
+            rlVertex2f(b.x, b.y);
+            rlVertex2f(c.x, c.y);
+        }
+        rlEnd();
+        rlDrawRenderBatchActive();
+        rlEnableBackfaceCulling();
+    }
+
+    void DrawLayout(const App& app, const View& view, Rectangle canvas)
     {
         const Necklace& necklace = *app.necklace;
 
@@ -1835,6 +1963,102 @@ namespace
         const auto toScreen = [&](const BeadPos& g) { return view.ToScreen(g); };
         const float beadRadius = necklace.radius * cell;
         const float thickness = Clampf(cell * 0.08f, 1.25f, 4.5f);
+
+        if (app.physics) {
+            struct FillRegion
+            {
+                std::vector<Vector2> outer;
+                std::vector<std::vector<Vector2>> holes;
+                std::vector<Vec2d> outerGrid;
+                Vec2d centroid{0.0, 0.0};
+                double area = 0.0;
+                bool highlighted = false;
+            };
+            std::vector<FillRegion> regions;
+            regions.reserve(necklace.faceBeads.size());
+            for (const FaceBead& fb : necklace.faceBeads) {
+                std::vector<Vec2d> poly;
+                std::vector<std::vector<Vec2d>> holes;
+                if (!app.physics->FaceBeadBoundaryPolygon(fb, &poly, &holes)) {
+                    continue;
+                }
+                FillRegion region;
+                region.highlighted = fb.highlighted;
+                region.area = ShoelaceArea(poly);
+                region.outerGrid = poly;
+                region.centroid = Vec2d{static_cast<double>(fb.pos.x),
+                                        static_cast<double>(fb.pos.y)};
+                region.outer.reserve(poly.size());
+                for (const Vec2d& p : poly) {
+                    region.outer.push_back(
+                        view.ToScreen(BeadPos{static_cast<float>(p.x), static_cast<float>(p.y)}));
+                }
+                for (const std::vector<Vec2d>& hole : holes) {
+                    std::vector<Vector2> hs;
+                    hs.reserve(hole.size());
+                    for (const Vec2d& p : hole) {
+                        hs.push_back(
+                            view.ToScreen(BeadPos{static_cast<float>(p.x), static_cast<float>(p.y)}));
+                    }
+                    if (hs.size() >= 3) {
+                        region.holes.push_back(std::move(hs));
+                    }
+                }
+                regions.push_back(std::move(region));
+            }
+            const auto contains = [&](size_t outerI, size_t innerI) {
+                const FillRegion& outer = regions[outerI];
+                const FillRegion& inner = regions[innerI];
+                return inner.area + 1e-12 < outer.area &&
+                       PointInPolygon(inner.centroid, outer.outerGrid);
+            };
+            if (app.exteriorHighlighted) {
+                DrawRectangleRec(canvas, kHighlightFill);
+            }
+            // Punch every finite/circle interior so exterior yellow is one
+            // layer, then paint highlighted faces (punching nested/sibling
+            // interiors that sit inside them), then punch unhighlighted
+            // siblings that do not contain a highlighted region.
+            for (const FillRegion& region : regions) {
+                FillPolygonScreen(region.outer, kBackground);
+            }
+            std::vector<size_t> highlighted;
+            highlighted.reserve(regions.size());
+            for (size_t i = 0; i < regions.size(); ++i) {
+                if (regions[i].highlighted) {
+                    highlighted.push_back(i);
+                }
+            }
+            std::sort(highlighted.begin(), highlighted.end(), [&](size_t a, size_t b) {
+                return regions[a].area > regions[b].area;
+            });
+            for (const size_t i : highlighted) {
+                FillPolygonScreen(regions[i].outer, kHighlightFill);
+                for (size_t j = 0; j < regions.size(); ++j) {
+                    if (j != i && contains(i, j)) {
+                        FillPolygonScreen(regions[j].outer, kBackground);
+                    }
+                }
+                for (const std::vector<Vector2>& hole : regions[i].holes) {
+                    FillPolygonScreen(hole, kBackground);
+                }
+            }
+            for (size_t u = 0; u < regions.size(); ++u) {
+                if (regions[u].highlighted) {
+                    continue;
+                }
+                bool coversHighlight = false;
+                for (const size_t h : highlighted) {
+                    if (contains(u, h)) {
+                        coversHighlight = true;
+                        break;
+                    }
+                }
+                if (!coversHighlight) {
+                    FillPolygonScreen(regions[u].outer, kBackground);
+                }
+            }
+        }
 
         // Vertex and edge beads underneath the multiloop (optional).
         const float outline = Clampf(beadRadius * 0.10f, 1.0f, 3.0f);
@@ -2063,6 +2287,7 @@ namespace
         const int screenHeight = GetScreenHeight();
         const Vector2 mouse = GetMousePosition();
         const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+        const bool rightClick = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
 
         const float pad = 10.0f;
         const float row0 = pad;
@@ -2417,6 +2642,18 @@ namespace
             const bool tuningBlocks = PhysicsTuningBlocksInput(app.tuningUI, mouse);
             if (app.physics) {
                 const Vector2 gridMouse = view.ToGrid(mouse);
+                // Right-click toggles the innermost region under the cursor.
+                if (rightClick && !app.dropdownOpen && !tuningBlocks &&
+                    CheckCollisionPointRec(mouse, canvas)) {
+                    const int region = app.physics->PickRegionAt(gridMouse);
+                    if (region < 0) {
+                        app.exteriorHighlighted = !app.exteriorHighlighted;
+                    }
+                    else if (region < static_cast<int>(app.necklace->faceBeads.size())) {
+                        FaceBead& fb = app.necklace->faceBeads[static_cast<size_t>(region)];
+                        fb.highlighted = !fb.highlighted;
+                    }
+                }
                 // Click and drag a bead (unless interacting with the dropdown).
                 if (click && !app.dropdownOpen && !tuningBlocks &&
                     CheckCollisionPointRec(mouse, canvas) &&
@@ -2546,7 +2783,7 @@ namespace
                 }
             }
             if (app.necklace && app.layout) {
-                DrawLayout(app, view);
+                DrawLayout(app, view, canvas);
             }
 
             if (app.debug && app.physics && app.necklace) {

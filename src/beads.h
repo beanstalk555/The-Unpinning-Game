@@ -63,6 +63,9 @@ struct FaceBead
     mutable std::vector<std::vector<int>> holeBeads;
     // Excess area at the last structure rebuild (topology-fresh positions).
     double cachedExcessArea = 0.0;
+    // User toggle: yellow region fill (right-click). Survives drag, tighten,
+    // and R3; R2 merge ORs this onto the surviving bead.
+    bool highlighted = false;
 
     // Walk boundary beads in phi order; fills boundaryBeads and boundaryDots.
     void WalkFaceBoundary(const Multiloop& loop, const Necklace& neck,

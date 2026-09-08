@@ -173,6 +173,10 @@ public:
     bool FaceBeadBoundaryPolygon(const FaceBead& fb, std::vector<Vec2d>* out,
                                  std::vector<std::vector<Vec2d>>* holes) const;
 
+    // Innermost face bead whose polygon-with-holes contains `gridPos`, or -1
+    // for the unbounded exterior (no finite/circle region contains the point).
+    int PickRegionAt(Vector2 gridPos) const;
+
     // Same, looked up by combinatorial face index. Exterior face is infinite.
     double ExcessArea(int face) const;
 

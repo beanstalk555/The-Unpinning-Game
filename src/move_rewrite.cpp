@@ -986,6 +986,23 @@ bool FinishMoveBookkeeping(const Multiloop& oldLoop, const Multiloop& newLoop,
     }
 
     // ---- Face beads. ----
+    bool splitHighlighted = false;
+    int splitOuterCircle = -1;
+    bool splitBeadKeptAsPad = false;
+    if (in.splitFace >= 0) {
+        for (const FaceBead& fb : neck.faceBeads) {
+            if (fb.face == in.splitFace && fb.highlighted) {
+                splitHighlighted = true;
+                break;
+            }
+        }
+        if (result.disconnected) {
+            const Piece& o = pieces[static_cast<size_t>(outer)];
+            if (o.circle) {
+                splitOuterCircle = o.circleIndex;
+            }
+        }
+    }
     std::vector<size_t> erase;
     std::vector<int> padOfCircle(rw.circleArcs.size(), -1);
     for (size_t fi = 0; fi < neck.faceBeads.size(); ++fi) {
@@ -1020,6 +1037,11 @@ bool FinishMoveBookkeeping(const Multiloop& oldLoop, const Multiloop& newLoop,
         }
         if (padCircle >= 0) {
             if (padOfCircle[static_cast<size_t>(padCircle)] >= 0) {
+                neck.faceBeads[static_cast<size_t>(padOfCircle[static_cast<size_t>(padCircle)])]
+                    .highlighted = neck.faceBeads[static_cast<size_t>(
+                                       padOfCircle[static_cast<size_t>(padCircle)])]
+                                       .highlighted ||
+                                   fb.highlighted;
                 erase.push_back(fi);
                 continue;
             }
@@ -1027,6 +1049,9 @@ bool FinishMoveBookkeeping(const Multiloop& oldLoop, const Multiloop& newLoop,
             const std::vector<int> ring = CircleRingThrough(neck, seed);
             if (ring.size() < 3) {
                 return false;
+            }
+            if (fb.face == in.splitFace) {
+                splitBeadKeptAsPad = true;
             }
             MakePad(fb, ring);
             padOfCircle[static_cast<size_t>(padCircle)] = static_cast<int>(fi);
@@ -1054,6 +1079,10 @@ bool FinishMoveBookkeeping(const Multiloop& oldLoop, const Multiloop& newLoop,
         }
         FaceBead pad;
         pad.label = label;
+        if (splitHighlighted && !splitBeadKeptAsPad &&
+            splitOuterCircle == static_cast<int>(ci)) {
+            pad.highlighted = true;
+        }
         MakePad(pad, ring);
         float cx = 0.0f;
         float cy = 0.0f;

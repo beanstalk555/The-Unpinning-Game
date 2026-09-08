@@ -136,6 +136,108 @@ bool PointInPolygonWithHoles(const Vec2d& point, const std::vector<Vec2d>& outer
     return true;
 }
 
+namespace
+{
+    double EarClipCross(const Vec2d& a, const Vec2d& b, const Vec2d& c)
+    {
+        return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    }
+
+    bool PointInTriangleStrict(const Vec2d& p, const Vec2d& a, const Vec2d& b, const Vec2d& c)
+    {
+        const double c0 = EarClipCross(a, b, p);
+        const double c1 = EarClipCross(b, c, p);
+        const double c2 = EarClipCross(c, a, p);
+        const double eps = 1e-12;
+        return (c0 > eps && c1 > eps && c2 > eps) || (c0 < -eps && c1 < -eps && c2 < -eps);
+    }
+}
+
+bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
+{
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+    const int n0 = static_cast<int>(vertices.size());
+    if (n0 < 3) {
+        return false;
+    }
+    std::vector<int> idx(static_cast<size_t>(n0));
+    for (int i = 0; i < n0; ++i) {
+        idx[static_cast<size_t>(i)] = i;
+    }
+    const double area = SignedShoelaceArea(vertices);
+    if (std::abs(area) < 1e-18) {
+        return false;
+    }
+    const bool ccw = area > 0.0;
+
+    auto isConvex = [&](int p, int c, int nx) {
+        const double cr = EarClipCross(vertices[static_cast<size_t>(idx[static_cast<size_t>(p)])],
+                                       vertices[static_cast<size_t>(idx[static_cast<size_t>(c)])],
+                                       vertices[static_cast<size_t>(idx[static_cast<size_t>(nx)])]);
+        return ccw ? cr > 1e-12 : cr < -1e-12;
+    };
+
+    int guard = n0 * n0;
+    while (static_cast<int>(idx.size()) > 3 && guard-- > 0) {
+        bool clipped = false;
+        const int n = static_cast<int>(idx.size());
+        for (int i = 0; i < n; ++i) {
+            const int p = (i + n - 1) % n;
+            const int nx = (i + 1) % n;
+            if (!isConvex(p, i, nx)) {
+                continue;
+            }
+            const Vec2d& A = vertices[static_cast<size_t>(idx[static_cast<size_t>(p)])];
+            const Vec2d& B = vertices[static_cast<size_t>(idx[static_cast<size_t>(i)])];
+            const Vec2d& C = vertices[static_cast<size_t>(idx[static_cast<size_t>(nx)])];
+            bool ear = true;
+            for (int j = 0; j < n; ++j) {
+                if (j == p || j == i || j == nx) {
+                    continue;
+                }
+                if (PointInTriangleStrict(
+                        vertices[static_cast<size_t>(idx[static_cast<size_t>(j)])], A, B, C)) {
+                    ear = false;
+                    break;
+                }
+            }
+            if (!ear) {
+                continue;
+            }
+            out->push_back(idx[static_cast<size_t>(p)]);
+            out->push_back(idx[static_cast<size_t>(i)]);
+            out->push_back(idx[static_cast<size_t>(nx)]);
+            idx.erase(idx.begin() + i);
+            clipped = true;
+            break;
+        }
+        if (!clipped) {
+            const int n = static_cast<int>(idx.size());
+            for (int i = 1; i + 1 < n; ++i) {
+                out->push_back(idx[0]);
+                out->push_back(idx[static_cast<size_t>(i)]);
+                out->push_back(idx[static_cast<size_t>(i + 1)]);
+            }
+            idx.clear();
+            break;
+        }
+    }
+    if (idx.size() == 3) {
+        out->push_back(idx[0]);
+        out->push_back(idx[1]);
+        out->push_back(idx[2]);
+    }
+    if (!ccw) {
+        for (size_t i = 0; i + 2 < out->size(); i += 3) {
+            std::swap((*out)[i], (*out)[i + 1]);
+        }
+    }
+    return out->size() >= 3;
+}
+
 InscribedCircle LargestInscribedCircle(const std::vector<Vec2d>& vertices, double precision)
 {
     return LargestInscribedCircle(vertices, {}, precision);

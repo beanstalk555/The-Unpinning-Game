@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <unordered_map>
@@ -2051,6 +2052,30 @@ bool Physics::FaceBeadInsideFace(const FaceBead& fb) const
     return PointInPolygonWithHoles(center, poly, holes);
 }
 
+int Physics::PickRegionAt(Vector2 gridPos) const
+{
+    const Vec2d p{static_cast<double>(gridPos.x), static_cast<double>(gridPos.y)};
+    int best = -1;
+    double bestArea = 0.0;
+    for (size_t fi = 0; fi < neck_->faceBeads.size(); ++fi) {
+        const FaceBead& fb = neck_->faceBeads[fi];
+        std::vector<Vec2d> poly;
+        std::vector<std::vector<Vec2d>> holes;
+        if (!FaceBeadBoundaryPolygon(fb, &poly, &holes)) {
+            continue;
+        }
+        if (!PointInPolygonWithHoles(p, poly, holes)) {
+            continue;
+        }
+        const double area = ShoelaceArea(poly);
+        if (best < 0 || area < bestArea) {
+            best = static_cast<int>(fi);
+            bestArea = area;
+        }
+    }
+    return best;
+}
+
 bool Physics::IsCircleFaceBead(const FaceBead& fb) const
 {
     return fb.face < 0 || unknot_;
@@ -3422,6 +3447,9 @@ void Physics::TryFaceMerge()
     if (dist > 0.25f * diameter_ && mergeFrames_ < kMergeFrameCap) {
         return;
     }
+    neck_->faceBeads[static_cast<size_t>(keepIdx)].highlighted =
+        neck_->faceBeads[static_cast<size_t>(keepIdx)].highlighted ||
+        neck_->faceBeads[static_cast<size_t>(dropIdx)].highlighted;
     neck_->faceBeads.erase(neck_->faceBeads.begin() + dropIdx);
     if (static_cast<size_t>(dropIdx) < fvel_.size()) {
         fvel_.erase(fvel_.begin() + dropIdx);

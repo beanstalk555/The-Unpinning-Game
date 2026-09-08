@@ -108,6 +108,21 @@ bool RunPermutationTests()
         Check(!PointInPolygon({0.5, 0.5}, {}), "point-in-poly: empty polygon is outside");
 
         {
+            std::vector<int> tris;
+            Check(EarClipTriangles(lShape, &tris) && tris.size() >= 9,
+                  "ear-clip: L-shape yields at least 3 triangles");
+            double clipArea = 0.0;
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                const Vec2d& a = lShape[static_cast<size_t>(tris[i])];
+                const Vec2d& b = lShape[static_cast<size_t>(tris[i + 1])];
+                const Vec2d& c = lShape[static_cast<size_t>(tris[i + 2])];
+                clipArea +=
+                    std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5;
+            }
+            Check(near(clipArea, 3.0), "ear-clip: L-shape triangulation area is 3");
+        }
+
+        {
             const InscribedCircle sq = LargestInscribedCircle(unitSquare, 0.01);
             Check(sq.found, "inscribed: unit square finds a circle");
             Check(PointInPolygon(sq.center, unitSquare), "inscribed: square center is inside");
@@ -1578,6 +1593,23 @@ bool RunPermutationTests()
             PhysicsParams params;
             Physics phys(*s->loop, s->neck, params, s->exteriors);
             phys.Step();
+            {
+                bool hitCenter = false;
+                for (size_t i = 0; i < s->neck.faceBeads.size(); ++i) {
+                    const FaceBead& fb = s->neck.faceBeads[i];
+                    if (!phys.FaceBeadInsideFace(fb)) {
+                        continue;
+                    }
+                    const int hit = phys.PickRegionAt({fb.pos.x, fb.pos.y});
+                    if (hit == static_cast<int>(i)) {
+                        hitCenter = true;
+                        break;
+                    }
+                }
+                Check(hitCenter, "R2 trefoil: PickRegionAt hits a face bead at its center");
+                Check(phys.PickRegionAt({-100.0f, -100.0f}) < 0,
+                      "R2 trefoil: PickRegionAt far away is the exterior");
+            }
             Check(phys.StartR2Move(0), "R2 trefoil: move starts");
             Check(runMove(phys), "R2 trefoil: sides strip and X-Y become tangent");
             R2FaceInfo info;
@@ -1612,6 +1644,14 @@ bool RunPermutationTests()
                 Check(static_cast<int>(s->neck.faceBeads.size()) == finiteFaces(*moved, ext) + 1,
                       "R2 trefoil: merged face briefly holds two beads");
                 phys.EnsureExteriorHoneycombMins(*moved, res.exteriorArcs);
+                bool highlightedDrop = false;
+                for (FaceBead& fb : s->neck.faceBeads) {
+                    if (fb.label == res.mergeDropLabel) {
+                        fb.highlighted = true;
+                        highlightedDrop = true;
+                    }
+                }
+                Check(highlightedDrop, "R2 trefoil: the drop merge bead can be highlighted");
                 bool physicsOk = true;
                 try {
                     Physics phys2(*moved, s->neck, params, ext);
@@ -1632,6 +1672,14 @@ bool RunPermutationTests()
                     keeperSurvives = keeperSurvives || fb.label == res.mergeKeepLabel;
                 }
                 Check(keeperSurvives, "R2 trefoil: the smaller label survives the merge");
+                bool keeperHighlighted = false;
+                for (const FaceBead& fb : s->neck.faceBeads) {
+                    if (fb.label == res.mergeKeepLabel) {
+                        keeperHighlighted = fb.highlighted;
+                    }
+                }
+                Check(keeperHighlighted,
+                      "R2 trefoil: highlighting the dropped face leaves the survivor highlighted");
             }
         }
         catch (const std::exception& e) {
