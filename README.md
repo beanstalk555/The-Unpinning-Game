@@ -46,7 +46,7 @@ make RAYLIB_PATH=C:/path/to/raylib
 
 Close any running copy of the app before rebuilding.
 
-### AI Disclosure
+## AI Disclosure
 
 The codebase for this prototype was mostly AI-generated using Cursor (Pro plan). The models used include:
 
