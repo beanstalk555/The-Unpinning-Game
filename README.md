@@ -12,7 +12,7 @@ A raylib prototype for the unpinning game. Features random multiloop generation 
 ### Download
 
 ```sh
-git clone <your-repo-url>
+git clone https://github.com/beanstalk555/The-Unpinning-Game/tree/main
 cd The-Unpinning-Game
 ```
 
