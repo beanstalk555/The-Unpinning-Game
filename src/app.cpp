@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <memory>
@@ -81,7 +82,9 @@ namespace
     // ----------------------------------------------------------------
 
     Font gFont;
+    Font gFontBold;
     bool gFontLoaded = false;
+    bool gFontBoldLoaded = false;
 
     void LoadUiFont()
     {
@@ -90,30 +93,65 @@ namespace
             "C:/Windows/Fonts/calibri.ttf",
             "C:/Windows/Fonts/arial.ttf",
         };
+        const char* boldCandidates[] = {
+            "C:/Windows/Fonts/segoeuib.ttf",
+            "C:/Windows/Fonts/calibrib.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+        };
         for (const char* path : candidates) {
             if (FileExists(path)) {
                 gFont = LoadFontEx(path, 64, nullptr, 0);
                 if (gFont.texture.id != 0) {
                     SetTextureFilter(gFont.texture, TEXTURE_FILTER_BILINEAR);
                     gFontLoaded = true;
-                    return;
+                    break;
                 }
             }
         }
-        gFont = GetFontDefault();
+        if (!gFontLoaded) {
+            gFont = GetFontDefault();
+        }
+        for (const char* path : boldCandidates) {
+            if (FileExists(path)) {
+                gFontBold = LoadFontEx(path, 64, nullptr, 0);
+                if (gFontBold.texture.id != 0) {
+                    SetTextureFilter(gFontBold.texture, TEXTURE_FILTER_BILINEAR);
+                    gFontBoldLoaded = true;
+                    break;
+                }
+            }
+        }
+        if (!gFontBoldLoaded) {
+            gFontBold = gFont;
+        }
     }
 
     void UnloadUiFont()
     {
+        if (gFontBoldLoaded) {
+            UnloadFont(gFontBold);
+            gFontBoldLoaded = false;
+        }
         if (gFontLoaded) {
             UnloadFont(gFont);
             gFontLoaded = false;
         }
     }
 
+    float TextWidthFont(const Font& font, const std::string& text, float size)
+    {
+        return MeasureTextEx(font, text.c_str(), size, 0.0f).x;
+    }
+
     float TextWidth(const std::string& text, float size)
     {
-        return MeasureTextEx(gFont, text.c_str(), size, 0.0f).x;
+        return TextWidthFont(gFont, text, size);
+    }
+
+    void DrawTextFont(const Font& font, const std::string& text, float x, float y, float size,
+                      Color color)
+    {
+        DrawTextEx(font, text.c_str(), Vector2{x, y}, size, 0.0f, color);
     }
 
     std::vector<std::string> BuildPhysicsTimingLines(const PhysicsDebugTimings& t, bool autoTightening)
@@ -164,7 +202,7 @@ namespace
 
     void DrawTextS(const std::string& text, float x, float y, float size, Color color)
     {
-        DrawTextEx(gFont, text.c_str(), Vector2{x, y}, size, 0.0f, color);
+        DrawTextFont(gFont, text, x, y, size, color);
     }
 
     void DrawDebugTextPanel(float x, float y, const std::vector<std::string>& lines, float fontSize,
@@ -550,6 +588,7 @@ namespace
         int debugFaceBeadIndex = -1;
         int pickClickBody = -1;
         Vector2 pickClickPos = {0.0f, 0.0f};
+        bool pickPressedOnCanvas = false;
         // The 1-face case (a simple closed curve) has no crossings, so it
         // bypasses the permutation pipeline and is drawn directly.
         bool unknotMode = false;
@@ -573,7 +612,7 @@ namespace
         float viewLookY0 = 0.0f;
         float viewLookY1 = 0.0f;
 
-        static constexpr int kR3UndoLimit = 5;
+        static constexpr int kR3UndoLimit = 10;
         struct R3UndoSnapshot
         {
             std::unique_ptr<Multiloop> loop;
@@ -717,6 +756,8 @@ namespace
         {
             std::unordered_map<int, bool> byFace;
             std::unordered_map<int, bool> byCircle;
+            std::unordered_map<int, bool> pinnedByFace;
+            std::unordered_map<int, bool> pinnedByCircle;
             bool exterior = false;
         };
 
@@ -741,11 +782,14 @@ namespace
             for (const FaceBead& fb : necklace->faceBeads) {
                 if (fb.face >= 0) {
                     snap.byFace[fb.face] = snap.byFace[fb.face] || fb.highlighted;
+                    snap.pinnedByFace[fb.face] = snap.pinnedByFace[fb.face] || fb.pinned;
                 }
                 else {
                     const int strand = CirclePadStrand(*necklace, fb);
                     if (strand >= 0) {
                         snap.byCircle[strand] = snap.byCircle[strand] || fb.highlighted;
+                        snap.pinnedByCircle[strand] =
+                            snap.pinnedByCircle[strand] || fb.pinned;
                     }
                 }
             }
@@ -758,6 +802,7 @@ namespace
             if (necklace) {
                 for (FaceBead& fb : necklace->faceBeads) {
                     fb.highlighted = false;
+                    fb.pinned = false;
                     if (fb.face >= 0) {
                         const auto it = snap.byFace.find(fb.face);
                         if (it != snap.byFace.end() && it->second) {
@@ -766,12 +811,21 @@ namespace
                         if (oldExt.count(fb.face) != 0 && snap.exterior) {
                             fb.highlighted = true;
                         }
+                        const auto pinIt = snap.pinnedByFace.find(fb.face);
+                        if (pinIt != snap.pinnedByFace.end() && pinIt->second) {
+                            fb.pinned = true;
+                        }
                     }
                     else {
                         const int strand = CirclePadStrand(*necklace, fb);
                         const auto it = snap.byCircle.find(strand);
                         if (strand >= 0 && it != snap.byCircle.end() && it->second) {
                             fb.highlighted = true;
+                        }
+                        const auto pinIt = snap.pinnedByCircle.find(strand);
+                        if (strand >= 0 && pinIt != snap.pinnedByCircle.end() &&
+                            pinIt->second) {
+                            fb.pinned = true;
                         }
                     }
                 }
@@ -1148,6 +1202,94 @@ namespace
                 }
             }
             return false;
+        }
+
+        // Start R0/R1/R2/R3 from an unpinned region. No-op if the move is
+        // invalid (busy physics, nested components, wrong degree, etc.).
+        void TryStartReidemeisterFromFaceBead(int fi)
+        {
+            if (!physics || !necklace || fi < 0 ||
+                fi >= static_cast<int>(necklace->faceBeads.size())) {
+                return;
+            }
+            const FaceBead& fb = necklace->faceBeads[static_cast<size_t>(fi)];
+            if (fb.pinned) {
+                return;
+            }
+            const bool idle = !physics->AutoTightening() && !physics->MoveActive();
+            if (!idle) {
+                return;
+            }
+            int padStrand = -1;
+            for (const int bead : fb.boundaryBeads) {
+                if (bead < 0 || bead >= static_cast<int>(necklace->beads.size())) {
+                    continue;
+                }
+                const Bead& b = necklace->beads[static_cast<size_t>(bead)];
+                if (!b.removed && !b.isVertex) {
+                    padStrand = b.strand;
+                    break;
+                }
+            }
+            const bool circlePad = unknotMode || fb.face < 0;
+            if (circlePad && fb.holeBeads.empty() && !CircleHasNested(padStrand)) {
+                PushR3Undo();
+                if (!physics->StartR0Move(fi) && !r3Undo.empty()) {
+                    r3Undo.pop_back();
+                }
+                return;
+            }
+            const size_t degree = fb.phiCycle.size();
+            if (fb.face >= 0 && degree >= 1 && degree <= 3 && !unknotMode &&
+                !FaceHasNested(fb.face)) {
+                PushR3Undo();
+                bool started = false;
+                if (degree == 1) {
+                    started = physics->StartR1Move(fb.face);
+                }
+                else if (degree == 2) {
+                    started = physics->StartR2Move(fb.face);
+                }
+                else {
+                    started = physics->StartR3Move(fb.face);
+                }
+                if (!started && !r3Undo.empty()) {
+                    r3Undo.pop_back();
+                }
+            }
+        }
+
+        void TryStartReidemeisterAt(Vector2 gridPos)
+        {
+            if (!physics || !necklace) {
+                return;
+            }
+            const int region = physics->PickRegionAt(gridPos);
+            if (region < 0 || region >= static_cast<int>(necklace->faceBeads.size())) {
+                return;
+            }
+            TryStartReidemeisterFromFaceBead(region);
+        }
+
+        void SetAllPinned(bool value)
+        {
+            if (!necklace) {
+                return;
+            }
+            bool any = false;
+            for (const FaceBead& fb : necklace->faceBeads) {
+                if (fb.pinned != value) {
+                    any = true;
+                    break;
+                }
+            }
+            if (!any) {
+                return;
+            }
+            PushR3Undo();
+            for (FaceBead& fb : necklace->faceBeads) {
+                fb.pinned = value;
+            }
         }
 
         // Face of `newLoop` sharing the most half-edges with `oldFace` of
@@ -2072,7 +2214,7 @@ namespace
                 DrawRing(c, beadRadius - outline, beadRadius, 0.0f, 360.0f, 48, kBeadOutline);
             }
         }
-        // Face beads are always shown.
+        // Face beads are always labeled; the disk is drawn only when pinned.
         const Color kOutsideFill = {210, 55, 50, 255};
         const Color kOutsideEdge = {140, 25, 22, 255};
         const Color kExcessHighlight = {255, 120, 0, 255};
@@ -2080,24 +2222,26 @@ namespace
             const Vector2 c = toScreen(faceBead.pos);
             const bool outside = app.debug && app.physics &&
                                  !app.physics->FaceBeadInsideFace(faceBead);
-            DrawCircleV(c, beadRadius, outside ? kOutsideFill : kFaceBeadFill);
-            Color ringColor = outside ? kOutsideEdge : kFaceBeadEdge;
-            float ringThickness = outline;
-            if (!outside && app.debug && app.physics &&
-                app.physics->FaceExcessArea(faceBead) > app.physicsParams.minExcessArea) {
-                ringColor = kExcessHighlight;
-                ringThickness = Clampf(outline * 2.5f, 2.5f, 6.0f);
+            if (faceBead.pinned) {
+                DrawCircleV(c, beadRadius, outside ? kOutsideFill : kFaceBeadFill);
+                Color ringColor = outside ? kOutsideEdge : kFaceBeadEdge;
+                float ringThickness = outline;
+                if (!outside && app.debug && app.physics &&
+                    app.physics->FaceExcessArea(faceBead) > app.physicsParams.minExcessArea) {
+                    ringColor = kExcessHighlight;
+                    ringThickness = Clampf(outline * 2.5f, 2.5f, 6.0f);
+                }
+                DrawRing(c, beadRadius - ringThickness, beadRadius, 0.0f, 360.0f, 48, ringColor);
             }
-            DrawRing(c, beadRadius - ringThickness, beadRadius, 0.0f, 360.0f, 48, ringColor);
             const std::string text = std::to_string(faceBead.label);
-            float fontSize = Clampf(beadRadius * 0.95f, 8.0f, 40.0f);
-            float textWidth = TextWidth(text, fontSize);
+            float fontSize = Clampf(beadRadius * 1.15f, 8.0f, 40.0f);
+            float textWidth = TextWidthFont(gFontBold, text, fontSize);
             if (textWidth > beadRadius * 1.5f) {
                 fontSize *= beadRadius * 1.5f / textWidth;
-                textWidth = TextWidth(text, fontSize);
+                textWidth = TextWidthFont(gFontBold, text, fontSize);
             }
-            DrawTextS(text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f, fontSize,
-                      outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
+            DrawTextFont(gFontBold, text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f,
+                         fontSize, outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
         }
 
         const auto drawEdgeBeadArc = [&](const Bead& bead, Color color) {
@@ -2557,7 +2701,7 @@ namespace
             if (fitEnabled && click && CheckCollisionPointRec(mouse, fitR)) {
                 BeginViewFit(app, canvas);
             }
-            const std::string undoLabel = "Undo move";
+            const std::string undoLabel = "Undo";
             const float undoW = TextWidth(undoLabel, 18.0f) + 24.0f;
             const float undoX = fitX + fitW + 8.0f;
             const Rectangle undoR = {undoX, row3, undoW, 30.0f};
@@ -2572,22 +2716,51 @@ namespace
             if (undoEnabled && click && CheckCollisionPointRec(mouse, undoR)) {
                 app.UndoR3();
             }
+            const std::string pinAllLabel = "Pin all";
+            const float pinAllW = TextWidth(pinAllLabel, 18.0f) + 24.0f;
+            const float pinAllX = undoX + undoW + 8.0f;
+            const Rectangle pinAllR = {pinAllX, row3, pinAllW, 30.0f};
+            const bool pinEnabled = !drawing && app.necklace != nullptr;
+            const bool pinAllHover = pinEnabled && CheckCollisionPointRec(mouse, pinAllR);
+            DrawRectangleRounded(pinAllR, 0.35f, 6,
+                                 !pinEnabled ? kDisabledFill
+                                             : (pinAllHover ? ColorBrightness(kAccent, -0.15f)
+                                                            : kAccent));
+            DrawTextS(pinAllLabel, pinAllR.x + 12.0f, pinAllR.y + 5.0f, 18.0f,
+                      pinEnabled ? WHITE : kBackground);
+            if (pinEnabled && click && CheckCollisionPointRec(mouse, pinAllR)) {
+                app.SetAllPinned(true);
+            }
+            const std::string unpinAllLabel = "Unpin all";
+            const float unpinAllW = TextWidth(unpinAllLabel, 18.0f) + 24.0f;
+            const float unpinAllX = pinAllX + pinAllW + 8.0f;
+            const Rectangle unpinAllR = {unpinAllX, row3, unpinAllW, 30.0f};
+            const bool unpinAllHover = pinEnabled && CheckCollisionPointRec(mouse, unpinAllR);
+            DrawRectangleRounded(unpinAllR, 0.35f, 6,
+                                 !pinEnabled ? kDisabledFill
+                                             : (unpinAllHover ? ColorBrightness(kAccent, -0.15f)
+                                                              : kAccent));
+            DrawTextS(unpinAllLabel, unpinAllR.x + 12.0f, unpinAllR.y + 5.0f, 18.0f,
+                      pinEnabled ? WHITE : kBackground);
+            if (pinEnabled && click && CheckCollisionPointRec(mouse, unpinAllR)) {
+                app.SetAllPinned(false);
+            }
+            const float afterButtonsX = unpinAllX + unpinAllW + 16.0f;
             if (app.physics) {
                 char buf[128];
                 std::snprintf(buf, sizeof(buf),
                               "tension: %.2f   (stretch %.2f  +  compression %.2f)",
                               app.physics->TotalTension(), app.physics->StretchTension(),
                               app.physics->CompressionTension());
-                DrawTextS(buf, undoX + undoW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
+                DrawTextS(buf, afterButtonsX, row3 + 6.0f, 18.0f, kTextDim);
                 if (app.physics->Tangled()) {
-                    const float tangleX =
-                        undoX + undoW + 16.0f + TextWidth(buf, 18.0f) + 12.0f;
+                    const float tangleX = afterButtonsX + TextWidth(buf, 18.0f) + 12.0f;
                     DrawTextS("tangle", tangleX, row3 + 6.0f, 18.0f, kErrorRed);
                 }
             }
             else {
-                DrawTextS("Drag beads to perturb; auto-tighten removes slack.",
-                          undoX + undoW + 16.0f, row3 + 6.0f, 18.0f, kTextDim);
+                DrawTextS("Drag beads to perturb; auto-tighten removes slack.", afterButtonsX,
+                          row3 + 6.0f, 18.0f, kTextDim);
             }
             if (!app.debug) {
                 app.tuningUI.open = false;
@@ -2658,13 +2831,17 @@ namespace
                 if (click && !app.dropdownOpen && !tuningBlocks &&
                     CheckCollisionPointRec(mouse, canvas) &&
                     !app.physics->Dragging()) {
+                    app.pickPressedOnCanvas = true;
+                    app.pickClickPos = mouse;
                     const float pickDist =
                         std::max(app.necklace->radius, 14.0f / view.cell);
                     const int body = app.physics->PickBody(gridMouse, pickDist);
                     if (body >= 0) {
                         app.pickClickBody = body;
-                        app.pickClickPos = mouse;
                         app.physics->BeginDrag(body, gridMouse);
+                    }
+                    else {
+                        app.pickClickBody = -1;
                     }
                 }
                 if (app.physics->Dragging()) {
@@ -2675,67 +2852,42 @@ namespace
                         const int beadCount = static_cast<int>(app.necklace->beads.size());
                         const float dx = mouse.x - app.pickClickPos.x;
                         const float dy = mouse.y - app.pickClickPos.y;
-                        const bool faceBeadClick =
-                            app.pickClickBody >= beadCount && dx * dx + dy * dy < 64.0f;
+                        const bool isClick = dx * dx + dy * dy < 64.0f;
+                        const bool pickedFace =
+                            app.pickClickBody >= beadCount &&
+                            app.pickClickBody <
+                                beadCount + static_cast<int>(app.necklace->faceBeads.size());
                         const int clickedFaceBead =
-                            faceBeadClick ? app.pickClickBody - beadCount : -1;
+                            pickedFace ? app.pickClickBody - beadCount : -1;
                         app.pickClickBody = -1;
+                        app.pickPressedOnCanvas = false;
                         app.physics->EndDrag();
                         app.physics->RefreshTangle();
-                        if (clickedFaceBead >= 0) {
-                            const FaceBead& fb = app.necklace->faceBeads[static_cast<size_t>(
+                        if (isClick && clickedFaceBead >= 0) {
+                            FaceBead& fb = app.necklace->faceBeads[static_cast<size_t>(
                                 clickedFaceBead)];
                             if (app.debug) {
                                 app.debugFaceBeadIndex = clickedFaceBead;
                                 app.physics->PrintShoelaceDebug(fb.face);
                             }
-                            const bool idle = !app.physics->AutoTightening() &&
-                                              !app.physics->MoveActive();
-                            int padStrand = -1;
-                            for (const int bead : fb.boundaryBeads) {
-                                if (bead < 0 ||
-                                    bead >= static_cast<int>(app.necklace->beads.size())) {
-                                    continue;
-                                }
-                                const Bead& b = app.necklace->beads[static_cast<size_t>(bead)];
-                                if (!b.removed && !b.isVertex) {
-                                    padStrand = b.strand;
-                                    break;
-                                }
-                            }
-                            const bool circlePad = app.unknotMode || fb.face < 0;
-                            if (circlePad && idle && fb.holeBeads.empty() &&
-                                !app.CircleHasNested(padStrand)) {
+                            if (fb.pinned) {
                                 app.PushR3Undo();
-                                if (!app.physics->StartR0Move(clickedFaceBead) &&
-                                    !app.r3Undo.empty()) {
-                                    app.r3Undo.pop_back();
-                                }
+                                fb.pinned = false;
                             }
                             else {
-                                // A click on a 1-, 2- or 3-gon region starts the
-                                // matching Reidemeister move (regions holding
-                                // nested components are left alone).
-                                const size_t degree = fb.phiCycle.size();
-                                if (fb.face >= 0 && degree >= 1 && degree <= 3 &&
-                                    !app.unknotMode && idle && !app.FaceHasNested(fb.face)) {
-                                    app.PushR3Undo();
-                                    bool started = false;
-                                    if (degree == 1) {
-                                        started = app.physics->StartR1Move(fb.face);
-                                    }
-                                    else if (degree == 2) {
-                                        started = app.physics->StartR2Move(fb.face);
-                                    }
-                                    else {
-                                        started = app.physics->StartR3Move(fb.face);
-                                    }
-                                    if (!started && !app.r3Undo.empty()) {
-                                        app.r3Undo.pop_back();
-                                    }
-                                }
+                                app.TryStartReidemeisterAt(gridMouse);
                             }
                         }
+                    }
+                }
+                else if (app.pickPressedOnCanvas && !IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+                    const float dx = mouse.x - app.pickClickPos.x;
+                    const float dy = mouse.y - app.pickClickPos.y;
+                    const bool isClick = dx * dx + dy * dy < 64.0f;
+                    app.pickPressedOnCanvas = false;
+                    app.pickClickBody = -1;
+                    if (isClick && !app.dropdownOpen && !tuningBlocks) {
+                        app.TryStartReidemeisterAt(gridMouse);
                     }
                 }
                 app.physics->SetGlobalCollisions(app.debug && app.showGlobalCollisions);

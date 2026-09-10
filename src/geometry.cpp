@@ -143,18 +143,24 @@ namespace
         return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
     }
 
-    bool PointInTriangleStrict(const Vec2d& p, const Vec2d& a, const Vec2d& b, const Vec2d& c)
+    // True when p is inside or on the boundary (needed on a grid, where a
+    // reflex vertex can sit on a candidate ear's diagonal).
+    bool PointInTriangleClosed(const Vec2d& p, const Vec2d& a, const Vec2d& b, const Vec2d& c)
     {
         const double c0 = EarClipCross(a, b, p);
         const double c1 = EarClipCross(b, c, p);
         const double c2 = EarClipCross(c, a, p);
         const double eps = 1e-12;
-        return (c0 > eps && c1 > eps && c2 > eps) || (c0 < -eps && c1 < -eps && c2 < -eps);
+        return (c0 >= -eps && c1 >= -eps && c2 >= -eps) ||
+               (c0 <= eps && c1 <= eps && c2 <= eps);
     }
 }
 
-bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
+bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out, bool* usedFan)
 {
+    if (usedFan != nullptr) {
+        *usedFan = false;
+    }
     if (out == nullptr) {
         return false;
     }
@@ -179,6 +185,18 @@ bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
                                        vertices[static_cast<size_t>(idx[static_cast<size_t>(nx)])]);
         return ccw ? cr > 1e-12 : cr < -1e-12;
     };
+    auto isFlatOrDup = [&](int p, int c, int nx) {
+        const Vec2d& A = vertices[static_cast<size_t>(idx[static_cast<size_t>(p)])];
+        const Vec2d& B = vertices[static_cast<size_t>(idx[static_cast<size_t>(c)])];
+        const Vec2d& C = vertices[static_cast<size_t>(idx[static_cast<size_t>(nx)])];
+        const double dx = B.x - A.x;
+        const double dy = B.y - A.y;
+        if (dx * dx + dy * dy < 1e-18) {
+            return true;
+        }
+        const double cr = EarClipCross(A, B, C);
+        return std::fabs(cr) <= 1e-12;
+    };
 
     int guard = n0 * n0;
     while (static_cast<int>(idx.size()) > 3 && guard-- > 0) {
@@ -187,6 +205,13 @@ bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
         for (int i = 0; i < n; ++i) {
             const int p = (i + n - 1) % n;
             const int nx = (i + 1) % n;
+            // Collinear mid-edge beads are not convex ears; dropping them
+            // keeps the outline and lets true corners clip.
+            if (isFlatOrDup(p, i, nx)) {
+                idx.erase(idx.begin() + i);
+                clipped = true;
+                break;
+            }
             if (!isConvex(p, i, nx)) {
                 continue;
             }
@@ -198,7 +223,7 @@ bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
                 if (j == p || j == i || j == nx) {
                     continue;
                 }
-                if (PointInTriangleStrict(
+                if (PointInTriangleClosed(
                         vertices[static_cast<size_t>(idx[static_cast<size_t>(j)])], A, B, C)) {
                     ear = false;
                     break;
@@ -215,6 +240,9 @@ bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out)
             break;
         }
         if (!clipped) {
+            if (usedFan != nullptr) {
+                *usedFan = true;
+            }
             const int n = static_cast<int>(idx.size());
             for (int i = 1; i + 1 < n; ++i) {
                 out->push_back(idx[0]);

@@ -123,6 +123,61 @@ bool RunPermutationTests()
         }
 
         {
+            // Same L with extra collinear beads on each run (orthogonal grid).
+            const std::vector<Vec2d> lCol = {{0.0, 0.0}, {1.0, 0.0}, {2.0, 0.0}, {2.0, 1.0},
+                                             {1.0, 1.0}, {1.0, 2.0}, {0.0, 2.0}, {0.0, 1.0}};
+            std::vector<int> tris;
+            bool usedFan = true;
+            Check(EarClipTriangles(lCol, &tris, &usedFan) && !usedFan,
+                  "ear-clip: collinear L-shape does not fall back to a fan");
+            double clipArea = 0.0;
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                const Vec2d& a = lCol[static_cast<size_t>(tris[i])];
+                const Vec2d& b = lCol[static_cast<size_t>(tris[i + 1])];
+                const Vec2d& c = lCol[static_cast<size_t>(tris[i + 2])];
+                clipArea +=
+                    std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5;
+            }
+            Check(near(clipArea, 3.0), "ear-clip: collinear L-shape triangulation area is 3");
+
+            const std::vector<Vec2d> c16 = {
+                {0.0, 0.0}, {0.4, 0.0}, {0.8, 0.0}, {1.2, 0.0}, {1.6, 0.0}, {2.0, 0.0},
+                {2.0, 0.5}, {2.0, 1.0}, {1.5, 1.0}, {1.0, 1.0}, {1.0, 2.0},
+                {0.5, 2.0}, {0.0, 2.0}, {0.0, 1.5}, {0.0, 1.0}, {0.0, 0.5}};
+            usedFan = true;
+            Check(near(ShoelaceArea(c16), 3.0), "ear-clip: 16-vertex C-shape area is 3");
+            Check(EarClipTriangles(c16, &tris, &usedFan) && !usedFan,
+                  "ear-clip: 16-vertex C-shape does not fall back to a fan");
+            clipArea = 0.0;
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                const Vec2d& a = c16[static_cast<size_t>(tris[i])];
+                const Vec2d& b = c16[static_cast<size_t>(tris[i + 1])];
+                const Vec2d& c = c16[static_cast<size_t>(tris[i + 2])];
+                clipArea +=
+                    std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5;
+            }
+            Check(near(clipArea, 3.0), "ear-clip: 16-vertex C-shape triangulation area is 3");
+
+            // Reflex vertex (1,1) lies on the diagonal (2,0)—(0,2). A strict
+            // inside-test would accept that ear and cover an extra 0.5.
+            const std::vector<Vec2d> lOnDiag = {
+                {0.0, 0.0}, {2.0, 0.0}, {2.0, 1.0}, {1.0, 1.0}, {1.0, 2.0}, {0.0, 2.0}};
+            usedFan = true;
+            Check(near(ShoelaceArea(lOnDiag), 3.0), "ear-clip: on-diagonal L-shape area is 3");
+            Check(EarClipTriangles(lOnDiag, &tris, &usedFan) && !usedFan,
+                  "ear-clip: on-diagonal L-shape does not fall back to a fan");
+            clipArea = 0.0;
+            for (size_t i = 0; i + 2 < tris.size(); i += 3) {
+                const Vec2d& a = lOnDiag[static_cast<size_t>(tris[i])];
+                const Vec2d& b = lOnDiag[static_cast<size_t>(tris[i + 1])];
+                const Vec2d& c = lOnDiag[static_cast<size_t>(tris[i + 2])];
+                clipArea +=
+                    std::abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) * 0.5;
+            }
+            Check(near(clipArea, 3.0), "ear-clip: on-diagonal L-shape triangulation area is 3");
+        }
+
+        {
             const InscribedCircle sq = LargestInscribedCircle(unitSquare, 0.01);
             Check(sq.found, "inscribed: unit square finds a circle");
             Check(PointInPolygon(sq.center, unitSquare), "inscribed: square center is inside");

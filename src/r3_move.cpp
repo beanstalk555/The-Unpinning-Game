@@ -287,6 +287,7 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
                 }
             }
         }
+        int maxId = -1;
         for (int k = 1; k <= newLoop->numEdges; ++k) {
             const int ns = newLoop->strandOfEdge[static_cast<size_t>(k)];
             if (ns >= 0 && ns < newLoop->numStrands &&
@@ -294,7 +295,13 @@ std::unique_ptr<Multiloop> FinalizeR3(const Multiloop& oldLoop, Necklace& neck,
                 newLoop->strandOfEdge[static_cast<size_t>(k)] =
                     newToOld[static_cast<size_t>(ns)];
             }
+            maxId = std::max(maxId, newLoop->strandOfEdge[static_cast<size_t>(k)]);
         }
+        // Keep color slots for strands that live only as circles (same as
+        // RemapStrandsThroughRewrite after R1/R2). Otherwise ids such as 2
+        // survive rematch while numStrands collapses to the sigma count and
+        // DrawLayout never paints them.
+        newLoop->numStrands = std::max(oldLoop.numStrands, maxId + 1);
     }
 
     // Match old faces (face beads plus every component exterior) to new faces

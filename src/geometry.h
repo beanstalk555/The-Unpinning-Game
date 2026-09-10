@@ -47,7 +47,8 @@ bool PointInPolygonWithHoles(const Vec2d& point, const std::vector<Vec2d>& outer
 // Ear-clip triangulation. Writes vertex-index triples into `out` (counterclockwise
 // in the given coordinate system). Returns false when n < 3 or the polygon is
 // degenerate; may fall back to a fan if clipping stalls on a concave/self-touching ring.
-bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out);
+bool EarClipTriangles(const std::vector<Vec2d>& vertices, std::vector<int>* out,
+                      bool* usedFan = nullptr);
 
 // True when chords (p0,p2) and (p1,p3) interleave around `center` — the
 // geometric pairing of opposite slots at a 4-valent vertex bead. False when

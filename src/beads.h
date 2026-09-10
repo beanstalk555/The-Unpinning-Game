@@ -66,6 +66,9 @@ struct FaceBead
     // User toggle: yellow region fill (right-click). Survives drag, tighten,
     // and R3; R2 merge ORs this onto the surviving bead.
     bool highlighted = false;
+    // When true the green disk is drawn; the label is always drawn. Fresh
+    // diagrams start unpinned. Survives Reset like labels and highlight.
+    bool pinned = false;
 
     // Walk boundary beads in phi order; fills boundaryBeads and boundaryDots.
     void WalkFaceBoundary(const Multiloop& loop, const Necklace& neck,
