@@ -51,6 +51,12 @@ namespace
     const Color kBeadOutline = {45, 45, 50, 255};
     const Color kFaceBeadFill = {88, 162, 70, 255};
     const Color kFaceBeadEdge = {50, 105, 40, 255};
+    const Color kGoldInner = {255, 228, 120, 165};
+    const Color kGoldOuter = {176, 120, 18, 130};
+    const Color kSilverInner = {228, 232, 238, 165};
+    const Color kSilverOuter = {118, 124, 136, 125};
+    const Color kBronzeInner = {214, 154, 88, 165};
+    const Color kBronzeOuter = {138, 72, 28, 130};
 
     // Distinct strand colors: 8 hand-picked ones, then a golden-angle walk
     // around the hue circle with varying saturation/value (distinct for 50+).
@@ -582,6 +588,7 @@ namespace
         PhysicsTuningUI tuningUI;
         bool debug = false;
         bool showBeads = false;
+        bool highlightReidemeister = false;
         bool showDebugTiming = true;
         bool showDebugExcessAreas = false;
         bool showGlobalCollisions = false;
@@ -1204,6 +1211,66 @@ namespace
             return false;
         }
 
+        enum class MoveHint
+        {
+            None,
+            R0,
+            R1,
+            R2,
+            R3
+        };
+
+        int PadStrandOf(const FaceBead& fb) const
+        {
+            if (!necklace) {
+                return -1;
+            }
+            for (const int bead : fb.boundaryBeads) {
+                if (bead < 0 || bead >= static_cast<int>(necklace->beads.size())) {
+                    continue;
+                }
+                const Bead& b = necklace->beads[static_cast<size_t>(bead)];
+                if (!b.removed && !b.isVertex) {
+                    return b.strand;
+                }
+            }
+            return -1;
+        }
+
+        // Legal R0/R1/R2/R3 faces only (Analyze*, not mere degree).
+        MoveHint FaceBeadMoveHint(const FaceBead& fb) const
+        {
+            if (fb.pinned) {
+                return MoveHint::None;
+            }
+            const bool circlePad = unknotMode || fb.face < 0;
+            if (circlePad && fb.holeBeads.empty() && !CircleHasNested(PadStrandOf(fb))) {
+                return MoveHint::R0;
+            }
+            if (!loop || unknotMode || fb.face < 0 || FaceHasNested(fb.face)) {
+                return MoveHint::None;
+            }
+            {
+                R1FaceInfo info;
+                if (AnalyzeR1Face(*loop, nullptr, fb.face, &info)) {
+                    return MoveHint::R1;
+                }
+            }
+            {
+                R2FaceInfo info;
+                if (AnalyzeR2Face(*loop, nullptr, fb.face, &info)) {
+                    return MoveHint::R2;
+                }
+            }
+            {
+                R3FaceInfo info;
+                if (AnalyzeR3Face(*loop, nullptr, fb.face, &info)) {
+                    return MoveHint::R3;
+                }
+            }
+            return MoveHint::None;
+        }
+
         // Start R0/R1/R2/R3 from an unpinned region. No-op if the move is
         // invalid (busy physics, nested components, wrong degree, etc.).
         void TryStartReidemeisterFromFaceBead(int fi)
@@ -1213,49 +1280,30 @@ namespace
                 return;
             }
             const FaceBead& fb = necklace->faceBeads[static_cast<size_t>(fi)];
-            if (fb.pinned) {
-                return;
-            }
             const bool idle = !physics->AutoTightening() && !physics->MoveActive();
             if (!idle) {
                 return;
             }
-            int padStrand = -1;
-            for (const int bead : fb.boundaryBeads) {
-                if (bead < 0 || bead >= static_cast<int>(necklace->beads.size())) {
-                    continue;
-                }
-                const Bead& b = necklace->beads[static_cast<size_t>(bead)];
-                if (!b.removed && !b.isVertex) {
-                    padStrand = b.strand;
-                    break;
-                }
-            }
-            const bool circlePad = unknotMode || fb.face < 0;
-            if (circlePad && fb.holeBeads.empty() && !CircleHasNested(padStrand)) {
-                PushR3Undo();
-                if (!physics->StartR0Move(fi) && !r3Undo.empty()) {
-                    r3Undo.pop_back();
-                }
+            const MoveHint hint = FaceBeadMoveHint(fb);
+            if (hint == MoveHint::None) {
                 return;
             }
-            const size_t degree = fb.phiCycle.size();
-            if (fb.face >= 0 && degree >= 1 && degree <= 3 && !unknotMode &&
-                !FaceHasNested(fb.face)) {
-                PushR3Undo();
-                bool started = false;
-                if (degree == 1) {
-                    started = physics->StartR1Move(fb.face);
-                }
-                else if (degree == 2) {
-                    started = physics->StartR2Move(fb.face);
-                }
-                else {
-                    started = physics->StartR3Move(fb.face);
-                }
-                if (!started && !r3Undo.empty()) {
-                    r3Undo.pop_back();
-                }
+            PushR3Undo();
+            bool started = false;
+            if (hint == MoveHint::R0) {
+                started = physics->StartR0Move(fi);
+            }
+            else if (hint == MoveHint::R1) {
+                started = physics->StartR1Move(fb.face);
+            }
+            else if (hint == MoveHint::R2) {
+                started = physics->StartR2Move(fb.face);
+            }
+            else {
+                started = physics->StartR3Move(fb.face);
+            }
+            if (!started && !r3Undo.empty()) {
+                r3Undo.pop_back();
             }
         }
 
@@ -2065,27 +2113,76 @@ namespace
         return view;
     }
 
-    void FillPolygonScreen(const std::vector<Vector2>& pts, Color color)
+    Color LerpColor(Color a, Color b, float t)
+    {
+        t = Clampf(t, 0.0f, 1.0f);
+        Color out;
+        out.r = static_cast<unsigned char>(a.r + (static_cast<int>(b.r) - a.r) * t);
+        out.g = static_cast<unsigned char>(a.g + (static_cast<int>(b.g) - a.g) * t);
+        out.b = static_cast<unsigned char>(a.b + (static_cast<int>(b.b) - a.b) * t);
+        out.a = static_cast<unsigned char>(a.a + (static_cast<int>(b.a) - a.a) * t);
+        return out;
+    }
+
+    void FillPolygonScreen(const std::vector<Vector2>& pts, Color inner, Color outer,
+                           Vector2 center)
     {
         if (pts.size() < 3) {
             return;
         }
         float minY = pts[0].y;
         float maxY = pts[0].y;
+        float rMaxSq = 0.0f;
+        const bool gradient = inner.r != outer.r || inner.g != outer.g || inner.b != outer.b ||
+                              inner.a != outer.a;
         for (const Vector2& p : pts) {
             minY = std::min(minY, p.y);
             maxY = std::max(maxY, p.y);
+            if (gradient) {
+                const float dx = p.x - center.x;
+                const float dy = p.y - center.y;
+                rMaxSq = std::max(rMaxSq, dx * dx + dy * dy);
+            }
         }
         const int y0 = static_cast<int>(std::floor(minY));
         const int y1 = static_cast<int>(std::ceil(maxY));
         if (y1 <= y0) {
             return;
         }
-        // Even-odd scanline: ear-clip fan fallback spans holes and also
-        // drops valid corners when triangles are centroid-filtered.
+        const float rMax = std::sqrt(rMaxSq);
+        const bool useGrad = gradient && rMax >= 1.0f;
+        const auto colorAt = [&](float x, float y) {
+            if (!useGrad) {
+                return inner;
+            }
+            const float dx = x - center.x;
+            const float dy = y - center.y;
+            const float t = 1.0f - std::sqrt(dx * dx + dy * dy) / rMax;
+            return LerpColor(outer, inner, t);
+        };
+        const auto emitVert = [&](float x, float y, Color c) {
+            rlColor4ub(c.r, c.g, c.b, c.a);
+            rlVertex2f(x, y);
+        };
+        const auto emitQuad = [&](float left, float right, float top, float bot) {
+            const Color cLT = colorAt(left, top);
+            const Color cRT = colorAt(right, top);
+            const Color cRB = colorAt(right, bot);
+            const Color cLB = colorAt(left, bot);
+            emitVert(left, top, cLT);
+            emitVert(right, top, cRT);
+            emitVert(right, bot, cRB);
+            emitVert(left, top, cLT);
+            emitVert(right, bot, cRB);
+            emitVert(left, bot, cLB);
+        };
+        // Even-odd scanline. Optional radial tint: split spans at center.x so
+        // the middle of the polygon interpolates to the inner (lighter) color.
         rlDisableBackfaceCulling();
         rlBegin(RL_TRIANGLES);
-        rlColor4ub(color.r, color.g, color.b, color.a);
+        if (!useGrad) {
+            rlColor4ub(inner.r, inner.g, inner.b, inner.a);
+        }
         std::vector<float> xs;
         xs.reserve(pts.size());
         const int n = static_cast<int>(pts.size());
@@ -2115,17 +2212,31 @@ namespace
                 if (right - left < 0.25f) {
                     continue;
                 }
-                rlVertex2f(left, top);
-                rlVertex2f(right, top);
-                rlVertex2f(right, bot);
-                rlVertex2f(left, top);
-                rlVertex2f(right, bot);
-                rlVertex2f(left, bot);
+                if (useGrad && left < center.x && center.x < right) {
+                    emitQuad(left, center.x, top, bot);
+                    emitQuad(center.x, right, top, bot);
+                }
+                else if (useGrad) {
+                    emitQuad(left, right, top, bot);
+                }
+                else {
+                    rlVertex2f(left, top);
+                    rlVertex2f(right, top);
+                    rlVertex2f(right, bot);
+                    rlVertex2f(left, top);
+                    rlVertex2f(right, bot);
+                    rlVertex2f(left, bot);
+                }
             }
         }
         rlEnd();
         rlDrawRenderBatchActive();
         rlEnableBackfaceCulling();
+    }
+
+    void FillPolygonScreen(const std::vector<Vector2>& pts, Color color)
+    {
+        FillPolygonScreen(pts, color, color, Vector2{0.0f, 0.0f});
     }
 
     void DrawLayout(const App& app, const View& view, Rectangle canvas)
@@ -2144,8 +2255,10 @@ namespace
                 std::vector<std::vector<Vector2>> holes;
                 std::vector<Vec2d> outerGrid;
                 Vec2d centroid{0.0, 0.0};
+                Vector2 screenCenter{0.0f, 0.0f};
                 double area = 0.0;
                 bool highlighted = false;
+                App::MoveHint moveHint = App::MoveHint::None;
             };
             std::vector<FillRegion> regions;
             regions.reserve(necklace.faceBeads.size());
@@ -2157,10 +2270,14 @@ namespace
                 }
                 FillRegion region;
                 region.highlighted = fb.highlighted;
+                region.moveHint = app.highlightReidemeister ? app.FaceBeadMoveHint(fb)
+                                                            : App::MoveHint::None;
                 region.area = ShoelaceArea(poly);
                 region.outerGrid = poly;
                 region.centroid = Vec2d{static_cast<double>(fb.pos.x),
                                         static_cast<double>(fb.pos.y)};
+                region.screenCenter =
+                    view.ToScreen(BeadPos{fb.pos.x, fb.pos.y});
                 region.outer.reserve(poly.size());
                 for (const Vec2d& p : poly) {
                     region.outer.push_back(
@@ -2229,6 +2346,46 @@ namespace
                 }
                 if (!coversHighlight) {
                     FillPolygonScreen(regions[u].outer, kBackground);
+                }
+            }
+            if (app.highlightReidemeister) {
+                std::vector<size_t> metal;
+                metal.reserve(regions.size());
+                for (size_t i = 0; i < regions.size(); ++i) {
+                    if (!regions[i].highlighted && regions[i].moveHint != App::MoveHint::None) {
+                        metal.push_back(i);
+                    }
+                }
+                std::sort(metal.begin(), metal.end(), [&](size_t a, size_t b) {
+                    return regions[a].area > regions[b].area;
+                });
+                const auto metalColors = [](App::MoveHint hint, Color* inner, Color* outer) {
+                    if (hint == App::MoveHint::R2) {
+                        *inner = kGoldInner;
+                        *outer = kGoldOuter;
+                    }
+                    else if (hint == App::MoveHint::R3) {
+                        *inner = kBronzeInner;
+                        *outer = kBronzeOuter;
+                    }
+                    else {
+                        *inner = kSilverInner;
+                        *outer = kSilverOuter;
+                    }
+                };
+                for (const size_t i : metal) {
+                    Color inner;
+                    Color outer;
+                    metalColors(regions[i].moveHint, &inner, &outer);
+                    FillPolygonScreen(regions[i].outer, inner, outer, regions[i].screenCenter);
+                    for (size_t j = 0; j < regions.size(); ++j) {
+                        if (j != i && contains(i, j)) {
+                            FillPolygonScreen(regions[j].outer, kBackground);
+                        }
+                    }
+                    for (const std::vector<Vector2>& hole : regions[i].holes) {
+                        FillPolygonScreen(hole, kBackground);
+                    }
                 }
             }
         }
@@ -2776,7 +2933,11 @@ namespace
             if (pinEnabled && click && CheckCollisionPointRec(mouse, unpinAllR)) {
                 app.SetAllPinned(false);
             }
-            const float afterButtonsX = unpinAllX + unpinAllW + 16.0f;
+            const float reidX = unpinAllX + unpinAllW + 16.0f;
+            const float reidW =
+                checkbox(reidX, row3, "Highlight Reidemeister regions",
+                         &app.highlightReidemeister, !drawing);
+            const float afterButtonsX = reidX + reidW + 16.0f;
             if (app.physics) {
                 char buf[128];
                 std::snprintf(buf, sizeof(buf),
