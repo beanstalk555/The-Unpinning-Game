@@ -2070,27 +2070,58 @@ namespace
         if (pts.size() < 3) {
             return;
         }
-        std::vector<Vec2d> verts;
-        verts.reserve(pts.size());
+        float minY = pts[0].y;
+        float maxY = pts[0].y;
         for (const Vector2& p : pts) {
-            verts.push_back(Vec2d{static_cast<double>(p.x), static_cast<double>(p.y)});
+            minY = std::min(minY, p.y);
+            maxY = std::max(maxY, p.y);
         }
-        std::vector<int> tris;
-        if (!EarClipTriangles(verts, &tris)) {
+        const int y0 = static_cast<int>(std::floor(minY));
+        const int y1 = static_cast<int>(std::ceil(maxY));
+        if (y1 <= y0) {
             return;
         }
-        // Raylib DrawTriangle is batched. Culling must stay off until the
-        // batch is flushed, or the GPU still drops clockwise screen triangles.
+        // Even-odd scanline: ear-clip fan fallback spans holes and also
+        // drops valid corners when triangles are centroid-filtered.
         rlDisableBackfaceCulling();
         rlBegin(RL_TRIANGLES);
         rlColor4ub(color.r, color.g, color.b, color.a);
-        for (size_t i = 0; i + 2 < tris.size(); i += 3) {
-            const Vector2 a = pts[static_cast<size_t>(tris[i])];
-            const Vector2 b = pts[static_cast<size_t>(tris[i + 1])];
-            const Vector2 c = pts[static_cast<size_t>(tris[i + 2])];
-            rlVertex2f(a.x, a.y);
-            rlVertex2f(b.x, b.y);
-            rlVertex2f(c.x, c.y);
+        std::vector<float> xs;
+        xs.reserve(pts.size());
+        const int n = static_cast<int>(pts.size());
+        for (int y = y0; y < y1; ++y) {
+            const float scan = static_cast<float>(y) + 0.5f;
+            xs.clear();
+            for (int i = 0, j = n - 1; i < n; j = i++) {
+                const float yA = pts[static_cast<size_t>(j)].y;
+                const float yB = pts[static_cast<size_t>(i)].y;
+                if ((yA > scan) == (yB > scan)) {
+                    continue;
+                }
+                const float dy = yB - yA;
+                if (std::fabs(dy) < 1e-8f) {
+                    continue;
+                }
+                const float xA = pts[static_cast<size_t>(j)].x;
+                const float xB = pts[static_cast<size_t>(i)].x;
+                xs.push_back((xB - xA) * (scan - yA) / dy + xA);
+            }
+            std::sort(xs.begin(), xs.end());
+            const float top = static_cast<float>(y);
+            const float bot = static_cast<float>(y + 1);
+            for (size_t k = 0; k + 1 < xs.size(); k += 2) {
+                const float left = xs[k];
+                const float right = xs[k + 1];
+                if (right - left < 0.25f) {
+                    continue;
+                }
+                rlVertex2f(left, top);
+                rlVertex2f(right, top);
+                rlVertex2f(right, bot);
+                rlVertex2f(left, top);
+                rlVertex2f(right, bot);
+                rlVertex2f(left, bot);
+            }
         }
         rlEnd();
         rlDrawRenderBatchActive();
