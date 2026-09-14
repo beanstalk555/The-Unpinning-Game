@@ -138,6 +138,8 @@ public:
     bool R2Active() const { return r2Active_; }
     bool R2Complete() const { return r2Complete_; }
     void GetR2Result(R2FaceInfo* info) const;
+    // Face bead erased at the start of R0/R1/R2 (live R0 pad, else stored copy).
+    const FaceBead* ShorteningHighlightBead() const;
 
     // Any Reidemeister animation (R0, R1, R2, R3 or post-repair) in progress.
     bool MoveActive() const { return r0Active_ || r1Active_ || r2Active_ || r3Active_; }

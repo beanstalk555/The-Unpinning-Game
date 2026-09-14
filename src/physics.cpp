@@ -3509,6 +3509,17 @@ void Physics::RestoreErasedFaceBead()
     structureDirty_ = true;
 }
 
+const FaceBead* Physics::ShorteningHighlightBead() const
+{
+    if (r0Active_) {
+        return &r0Pad_;
+    }
+    if (erasedFaceBeadValid_) {
+        return &erasedFaceBead_;
+    }
+    return nullptr;
+}
+
 bool Physics::PadEdgeToward(int vertexBead, int halfEdge, int minInteriors)
 {
     for (int guard = 0; guard < 8; ++guard) {

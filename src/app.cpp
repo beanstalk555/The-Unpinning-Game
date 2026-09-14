@@ -2369,17 +2369,17 @@ namespace
                 App::MoveHint moveHint = App::MoveHint::None;
             };
             std::vector<FillRegion> regions;
-            regions.reserve(necklace.faceBeads.size());
-            for (const FaceBead& fb : necklace.faceBeads) {
+            regions.reserve(necklace.faceBeads.size() + 1);
+            const auto appendRegion = [&](const FaceBead& fb, bool highlighted,
+                                          App::MoveHint moveHint) {
                 std::vector<Vec2d> poly;
                 std::vector<std::vector<Vec2d>> holes;
                 if (!app.physics->FaceBeadBoundaryPolygon(fb, &poly, &holes)) {
-                    continue;
+                    return;
                 }
                 FillRegion region;
-                region.highlighted = fb.highlighted;
-                region.moveHint = app.highlightReidemeister ? app.FaceBeadMoveHint(fb)
-                                                            : App::MoveHint::None;
+                region.highlighted = highlighted;
+                region.moveHint = moveHint;
                 region.area = ShoelaceArea(poly);
                 region.outerGrid = poly;
                 region.centroid = Vec2d{static_cast<double>(fb.pos.x),
@@ -2403,6 +2403,26 @@ namespace
                     }
                 }
                 regions.push_back(std::move(region));
+            };
+            for (const FaceBead& fb : necklace.faceBeads) {
+                appendRegion(fb, fb.highlighted,
+                             app.highlightReidemeister ? app.FaceBeadMoveHint(fb)
+                                                       : App::MoveHint::None);
+            }
+            if (const FaceBead* ghost = app.physics->ShorteningHighlightBead()) {
+                App::MoveHint hint = App::MoveHint::None;
+                if (app.highlightReidemeister) {
+                    if (app.physics->R0Active()) {
+                        hint = App::MoveHint::R0;
+                    }
+                    else if (app.physics->R1Active()) {
+                        hint = App::MoveHint::R1;
+                    }
+                    else if (app.physics->R2Active()) {
+                        hint = App::MoveHint::R2;
+                    }
+                }
+                appendRegion(*ghost, ghost->highlighted, hint);
             }
             const auto contains = [&](size_t outerI, size_t innerI) {
                 const FillRegion& outer = regions[outerI];
