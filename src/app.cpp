@@ -37,6 +37,8 @@ namespace
     const char* kExampleSigma =
         "(6,1,-7,-2)(11,2,-12,-3)(16,3,-17,-4)(12,7,-13,-8)(17,8,-18,-9)"
         "(4,9,-5,-10)(18,13,-1,-14)(5,14,-6,-15)(10,15,-11,-16)";
+    // Unbounded face (5, 9, 18, 14) of kExampleSigma.
+    constexpr int kExampleExteriorHalfEdge = 5;
 
     const Color kBackground = {245, 245, 248, 255};
     const Color kHighlightFill = {255, 220, 40, 90};
@@ -603,12 +605,14 @@ namespace
         bool wasR3Active = false;
 
         // Camera in grid coordinates: `viewCell` pixels per grid unit, look-at
-        // is the grid point mapped to the canvas center. Animated on fit.
+        // is the grid point mapped to the canvas center, `viewAngle` is
+        // counterclockwise about that point (y up). Animated on fit.
         const void* viewLayoutKey = nullptr;
         bool viewReady = false;
         float viewCell = 1.0f;
         float viewLookX = 0.0f;
         float viewLookY = 0.0f;
+        float viewAngle = 0.0f;
         int viewGridHeight = 0;
         bool viewAnimating = false;
         float viewAnimT = 0.0f;
@@ -618,6 +622,11 @@ namespace
         float viewLookX1 = 0.0f;
         float viewLookY0 = 0.0f;
         float viewLookY1 = 0.0f;
+        float viewAngle0 = 0.0f;
+        float viewAngle1 = 0.0f;
+        bool viewFitPending = false;
+
+        void RequestViewFit() { viewFitPending = true; }
 
         static constexpr int kR3UndoLimit = 10;
         struct R3UndoSnapshot
@@ -632,6 +641,7 @@ namespace
             float viewCell = 1.0f;
             float viewLookX = 0.0f;
             float viewLookY = 0.0f;
+            float viewAngle = 0.0f;
             int viewGridHeight = 0;
         };
         std::deque<R3UndoSnapshot> r3Undo;
@@ -656,6 +666,7 @@ namespace
             snap.viewCell = viewCell;
             snap.viewLookX = viewLookX;
             snap.viewLookY = viewLookY;
+            snap.viewAngle = viewAngle;
             snap.viewGridHeight = viewGridHeight;
             r3Undo.push_back(std::move(snap));
             while (static_cast<int>(r3Undo.size()) > kR3UndoLimit) {
@@ -706,6 +717,7 @@ namespace
             viewCell = snap.viewCell;
             viewLookX = snap.viewLookX;
             viewLookY = snap.viewLookY;
+            viewAngle = snap.viewAngle;
             viewGridHeight = snap.viewGridHeight;
             viewAnimating = false;
             try {
@@ -742,7 +754,14 @@ namespace
         App()
         {
             sigmaBox.text = kExampleSigma;
-            countBox.text = "20";
+            countBox.text = "10";
+            SubmitSigma();
+            if (loop) {
+                SelectFaceContaining(kExampleExteriorHalfEdge);
+                if (physics) {
+                    physics->StartAutoTighten();
+                }
+            }
         }
 
         std::unordered_set<int> PhysicsExteriors() const
@@ -924,6 +943,9 @@ namespace
                 physics.reset();
                 error = e.what();
             }
+            if (layout && necklace) {
+                RequestViewFit();
+            }
         }
 
         void EnterCircles(std::vector<MultiloopComponent> comps)
@@ -954,6 +976,7 @@ namespace
                     physics.reset();
                     error = e.what();
                 }
+                RequestViewFit();
                 return;
             }
             faceLabels.clear();
@@ -1082,6 +1105,7 @@ namespace
                         error = e.what();
                     }
                     RestoreHighlights(snap, oldExt, PhysicsExteriors());
+                    RequestViewFit();
                     return;
                 }
                 RebuildPacked();
@@ -1955,23 +1979,38 @@ namespace
     }
 
     // Mapping between grid coordinates (y up) and screen pixels, shared by
-    // rendering and bead picking so that they stay in sync.
+    // rendering and bead picking so that they stay in sync. Rotation is
+    // counterclockwise about the look-at; screen y is down.
     struct View
     {
         float cell = 1.0f;
-        float originX = 0.0f;
-        float originY = 0.0f;
-        int gridHeight = 0;
+        float lookX = 0.0f;
+        float lookY = 0.0f;
+        float angle = 0.0f;
+        float cx = 0.0f;
+        float cy = 0.0f;
+        float cosA = 1.0f;
+        float sinA = 0.0f;
 
         Vector2 ToScreen(const BeadPos& g) const
         {
-            return Vector2{originX + g.x * cell, originY + (gridHeight - g.y) * cell};
+            const float dx = g.x - lookX;
+            const float dy = g.y - lookY;
+            const float rx = dx * cosA - dy * sinA;
+            const float ry = dx * sinA + dy * cosA;
+            return Vector2{cx + rx * cell, cy - ry * cell};
         }
         Vector2 ToGrid(Vector2 s) const
         {
-            return Vector2{(s.x - originX) / cell, gridHeight - (s.y - originY) / cell};
+            const float rx = (s.x - cx) / cell;
+            const float ry = -(s.y - cy) / cell;
+            const float dx = rx * cosA + ry * sinA;
+            const float dy = -rx * sinA + ry * cosA;
+            return Vector2{lookX + dx, lookY + dy};
         }
     };
+
+    constexpr float kPiF = 3.14159265358979323846f;
 
     float EaseInOutCubic(float t)
     {
@@ -1981,6 +2020,14 @@ namespace
         }
         const float u = -2.0f * t + 2.0f;
         return 1.0f - (u * u * u) * 0.5f;
+    }
+
+    // AABB size is π-periodic; pick the lift of `candidate` nearest `current`.
+    float NearestPiPeriodic(float current, float candidate)
+    {
+        float d = candidate - current;
+        d -= kPiF * std::round(d / kPiF);
+        return current + d;
     }
 
     void LayoutCamera(const GridLayout& layout, Rectangle canvas, float* cell, float* lookX,
@@ -1995,56 +2042,98 @@ namespace
     }
 
     bool BeadCamera(const GridLayout& layout, const Necklace& necklace, Rectangle canvas,
-                    float* cell, float* lookX, float* lookY)
+                    float currentAngle, bool searchRotation, float* cell, float* lookX,
+                    float* lookY, float* angle)
     {
-        bool any = false;
-        float minX = 0.0f;
-        float minY = 0.0f;
-        float maxX = 0.0f;
-        float maxY = 0.0f;
-        const auto include = [&](float x, float y) {
-            if (!any) {
-                minX = maxX = x;
-                minY = maxY = y;
-                any = true;
-            }
-            else {
-                minX = std::min(minX, x);
-                maxX = std::max(maxX, x);
-                minY = std::min(minY, y);
-                maxY = std::max(maxY, y);
-            }
-        };
+        std::vector<Vector2> pts;
+        pts.reserve(necklace.beads.size() + necklace.faceBeads.size());
         for (const Bead& bead : necklace.beads) {
             if (bead.removed) {
                 continue;
             }
-            include(bead.pos.x, bead.pos.y);
+            pts.push_back(Vector2{bead.pos.x, bead.pos.y});
         }
         for (const FaceBead& fb : necklace.faceBeads) {
-            include(fb.pos.x, fb.pos.y);
+            pts.push_back(Vector2{fb.pos.x, fb.pos.y});
         }
-        if (!any) {
+        if (pts.empty()) {
             LayoutCamera(layout, canvas, cell, lookX, lookY);
+            *angle = searchRotation ? 0.0f : currentAngle;
             return false;
         }
+
         const float pad = std::max(4.0f * necklace.radius, 0.75f);
-        minX -= pad;
-        maxX += pad;
-        minY -= pad;
-        maxY += pad;
-        const float w = std::max(maxX - minX, 0.25f);
-        const float h = std::max(maxY - minY, 0.25f);
         const float margin = 45.0f;
-        const float cellW = (canvas.width - 2 * margin) / w;
-        const float cellH = (canvas.height - 2 * margin) / h;
-        *cell = Clampf(std::min(cellW, cellH), 3.0f, 250.0f);
-        *lookX = 0.5f * (minX + maxX);
-        *lookY = 0.5f * (minY + maxY);
+        const float availW = std::max(canvas.width - 2.0f * margin, 1.0f);
+        const float availH = std::max(canvas.height - 2.0f * margin, 1.0f);
+
+        const auto evaluate = [&](float theta, float* outLookX, float* outLookY) {
+            const float c = std::cos(theta);
+            const float s = std::sin(theta);
+            float minX = pts[0].x * c - pts[0].y * s;
+            float maxX = minX;
+            float minY = pts[0].x * s + pts[0].y * c;
+            float maxY = minY;
+            for (size_t i = 1; i < pts.size(); ++i) {
+                const float rx = pts[i].x * c - pts[i].y * s;
+                const float ry = pts[i].x * s + pts[i].y * c;
+                minX = std::min(minX, rx);
+                maxX = std::max(maxX, rx);
+                minY = std::min(minY, ry);
+                maxY = std::max(maxY, ry);
+            }
+            minX -= pad;
+            maxX += pad;
+            minY -= pad;
+            maxY += pad;
+            const float w = std::max(maxX - minX, 0.25f);
+            const float h = std::max(maxY - minY, 0.25f);
+            if (outLookX != nullptr && outLookY != nullptr) {
+                const float midRx = 0.5f * (minX + maxX);
+                const float midRy = 0.5f * (minY + maxY);
+                *outLookX = midRx * c + midRy * s;
+                *outLookY = -midRx * s + midRy * c;
+            }
+            return std::min(availW / w, availH / h);
+        };
+
+        if (!searchRotation) {
+            const float scale = evaluate(currentAngle, lookX, lookY);
+            *cell = Clampf(scale, 3.0f, 250.0f);
+            *angle = currentAngle;
+            return true;
+        }
+
+        constexpr int kCoarse = 180;
+        float bestTheta = 0.0f;
+        float bestScale = -1.0f;
+        for (int i = 0; i < kCoarse; ++i) {
+            const float theta = kPiF * static_cast<float>(i) / static_cast<float>(kCoarse);
+            const float scale = evaluate(theta, nullptr, nullptr);
+            if (scale > bestScale) {
+                bestScale = scale;
+                bestTheta = theta;
+            }
+        }
+        const float window = kPiF / static_cast<float>(kCoarse);
+        constexpr int kFine = 20;
+        for (int i = 0; i <= kFine; ++i) {
+            const float t = -1.0f + 2.0f * static_cast<float>(i) / static_cast<float>(kFine);
+            const float theta = bestTheta + t * window;
+            const float scale = evaluate(theta, nullptr, nullptr);
+            if (scale > bestScale) {
+                bestScale = scale;
+                bestTheta = theta;
+            }
+        }
+
+        evaluate(bestTheta, lookX, lookY);
+        *cell = Clampf(bestScale, 3.0f, 250.0f);
+        *angle = NearestPiPeriodic(currentAngle, bestTheta);
         return true;
     }
 
-    void BeginViewFit(App& app, Rectangle canvas)
+    void BeginViewFit(App& app, Rectangle canvas, bool searchRotation = true)
     {
         if (!app.layout) {
             return;
@@ -2052,27 +2141,33 @@ namespace
         float cell = app.viewCell;
         float lookX = app.viewLookX;
         float lookY = app.viewLookY;
+        float angle = searchRotation ? 0.0f : app.viewAngle;
         if (app.necklace) {
-            BeadCamera(*app.layout, *app.necklace, canvas, &cell, &lookX, &lookY);
+            BeadCamera(*app.layout, *app.necklace, canvas, app.viewAngle, searchRotation, &cell,
+                       &lookX, &lookY, &angle);
         }
         else {
             LayoutCamera(*app.layout, canvas, &cell, &lookX, &lookY);
         }
         const float dCell = std::fabs(cell - app.viewCell);
         const float dLook = std::hypot(lookX - app.viewLookX, lookY - app.viewLookY);
-        if (dCell < 0.15f && dLook < 0.02f) {
+        const float dAngle = std::fabs(angle - app.viewAngle);
+        if (dCell < 0.15f && dLook < 0.02f && dAngle < 0.002f) {
             app.viewCell = cell;
             app.viewLookX = lookX;
             app.viewLookY = lookY;
+            app.viewAngle = angle;
             app.viewAnimating = false;
             return;
         }
         app.viewCell0 = app.viewCell;
         app.viewLookX0 = app.viewLookX;
         app.viewLookY0 = app.viewLookY;
+        app.viewAngle0 = app.viewAngle;
         app.viewCell1 = cell;
         app.viewLookX1 = lookX;
         app.viewLookY1 = lookY;
+        app.viewAngle1 = angle;
         app.viewAnimT = 0.0f;
         app.viewAnimating = true;
     }
@@ -2080,8 +2175,16 @@ namespace
     View MakeView(App& app, const GridLayout& layout, Rectangle canvas)
     {
         const void* key = &layout;
-        if (!app.viewReady || app.viewLayoutKey != key) {
+        if (app.viewFitPending) {
+            BeginViewFit(app, canvas);
+            app.viewFitPending = false;
+            app.viewLayoutKey = key;
+            app.viewReady = true;
+            app.viewGridHeight = layout.height;
+        }
+        else if (!app.viewReady || app.viewLayoutKey != key) {
             LayoutCamera(layout, canvas, &app.viewCell, &app.viewLookX, &app.viewLookY);
+            app.viewAngle = 0.0f;
             app.viewGridHeight = layout.height;
             app.viewLayoutKey = key;
             app.viewReady = true;
@@ -2096,20 +2199,25 @@ namespace
             app.viewCell = app.viewCell0 + (app.viewCell1 - app.viewCell0) * u;
             app.viewLookX = app.viewLookX0 + (app.viewLookX1 - app.viewLookX0) * u;
             app.viewLookY = app.viewLookY0 + (app.viewLookY1 - app.viewLookY0) * u;
+            app.viewAngle = app.viewAngle0 + (app.viewAngle1 - app.viewAngle0) * u;
             if (app.viewAnimT >= 1.0f) {
                 app.viewCell = app.viewCell1;
                 app.viewLookX = app.viewLookX1;
                 app.viewLookY = app.viewLookY1;
+                app.viewAngle = app.viewAngle1;
                 app.viewAnimating = false;
             }
         }
 
         View view;
         view.cell = app.viewCell;
-        view.gridHeight = app.viewGridHeight;
-        view.originX = canvas.x + canvas.width * 0.5f - app.viewLookX * view.cell;
-        view.originY =
-            canvas.y + canvas.height * 0.5f - (view.gridHeight - app.viewLookY) * view.cell;
+        view.lookX = app.viewLookX;
+        view.lookY = app.viewLookY;
+        view.angle = app.viewAngle;
+        view.cx = canvas.x + canvas.width * 0.5f;
+        view.cy = canvas.y + canvas.height * 0.5f;
+        view.cosA = std::cos(app.viewAngle);
+        view.sinA = std::sin(app.viewAngle);
         return view;
     }
 
@@ -3112,7 +3220,8 @@ namespace
                 const bool autoNow = app.physics && app.physics->AutoTightening();
                 const bool r3Now = app.physics && app.physics->MoveActive();
                 if ((app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now)) {
-                    BeginViewFit(app, canvas);
+                    const bool searchRotation = app.wasAutoTightening && !autoNow;
+                    BeginViewFit(app, canvas, searchRotation);
                     if (app.physics) {
                         app.physics->RefreshTangle();
                     }
