@@ -1165,10 +1165,14 @@ namespace
             }
             physics->EnsureR3ExteriorHoneycombMins(*newLoop);
             physics.reset();
-            // Nesting parents follow their faces (labels are unchanged by R3).
-            for (MultiloopComponent& component : components) {
-                if (component.parentFace >= 0) {
-                    component.parentFace = RemapFaceByOverlap(*loop, *newLoop, component.parentFace);
+            // Nesting parents follow finite remnants of their faces.
+            {
+                const std::unordered_set<int> skipExt(newExteriors.begin(), newExteriors.end());
+                for (MultiloopComponent& component : components) {
+                    if (component.parentFace >= 0) {
+                        component.parentFace =
+                            RemapFaceByOverlap(*loop, *newLoop, component.parentFace, &skipExt);
+                    }
                 }
             }
             loop = std::move(newLoop);
@@ -1365,9 +1369,10 @@ namespace
         }
 
         // Face of `newLoop` sharing the most half-edges with `oldFace` of
-        // `oldLoop` (labels unchanged, as after an R3). -1 if none.
+        // `oldLoop`. Faces in `skip` (new exteriors) are ignored so a parent
+        // that split onto the unbounded region keeps a finite remnant.
         static int RemapFaceByOverlap(const Multiloop& oldLoop, const Multiloop& newLoop,
-                                      int oldFace)
+                                      int oldFace, const std::unordered_set<int>* skip = nullptr)
         {
             if (oldFace < 0 || oldFace >= static_cast<int>(oldLoop.faces.size())) {
                 return -1;
@@ -1376,6 +1381,9 @@ namespace
             int best = -1;
             size_t bestOverlap = 0;
             for (size_t f = 0; f < newLoop.faces.size(); ++f) {
+                if (skip != nullptr && skip->count(static_cast<int>(f)) != 0) {
+                    continue;
+                }
                 size_t overlap = 0;
                 for (const int h : newLoop.faces[f]) {
                     if (std::find(cycle.begin(), cycle.end(), h) != cycle.end()) {
