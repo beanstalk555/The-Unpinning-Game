@@ -2896,6 +2896,13 @@ void Physics::ClearR3State()
     r3SettleFrames_ = 0;
     r3Phase_ = R3Phase::PreHoneycomb;
     r3PreSub_ = R3PreSub::NeedRemove;
+    for (int i = 0; i < 3; ++i) {
+        r3HomotopyP_[i].clear();
+        r3HomotopyQ_[i].clear();
+        r3HomotopyStrand_[i] = 0;
+    }
+    r3HomotopyStep_ = 0;
+    r3HomotopyHidden_.clear();
 }
 
 std::vector<int> Physics::WalkSideChain(int vertexBead, int halfEdge) const
@@ -3848,9 +3855,7 @@ void Physics::R3PreHoneycombStep()
         }
         if (candidates.empty()) {
             // Cannot strip further without breaking neighbor honeycombs.
-            if (!BeginR3Slide()) {
-                CancelR3Move();
-            }
+            BeginR3HomotopyOrSlide();
             return;
         }
 
@@ -4003,9 +4008,7 @@ void Physics::BeginFortifyOrSlide()
         r3SettleFrames_ = 0;
         return;
     }
-    if (!BeginR3Slide()) {
-        CancelR3Move();
-    }
+    BeginR3HomotopyOrSlide();
 }
 
 void Physics::R3FortifyStep()
@@ -4015,9 +4018,260 @@ void Physics::R3FortifyStep()
     }
     r3SettleFrames_ += params_->autoStepsPerFrame;
     if (R3HoneycombSpokesSettled() || r3SettleFrames_ >= params_->relaxStepsMax) {
-        if (!BeginR3Slide()) {
-            CancelR3Move();
+        BeginR3HomotopyOrSlide();
+    }
+}
+
+namespace
+{
+    // Sample points along each curve. Does not change how long the morph lasts.
+    constexpr int kR3HomotopySubdivisions = 16;
+    // Displayed frames from t = 0 through t = 1.
+    constexpr int kR3HomotopyFrames = 11;
+    constexpr float kTwoPi = 6.28318530718f;
+
+    float Dist2(Vector2 a, Vector2 b)
+    {
+        const float dx = b.x - a.x;
+        const float dy = b.y - a.y;
+        return std::sqrt(dx * dx + dy * dy);
+    }
+
+    Vector2 BoundaryToward(Vector2 center, Vector2 other, float radius)
+    {
+        const float dx = other.x - center.x;
+        const float dy = other.y - center.y;
+        const float d = std::sqrt(dx * dx + dy * dy);
+        if (d < 1e-6f) {
+            return center;
         }
+        return Vector2{center.x + dx * radius / d, center.y + dy * radius / d};
+    }
+
+    // One orthogonal circle arc inside a bead, matching DrawOrthogonalArc:
+    // the circle through the two boundary points that meets the bead at right
+    // angles, or the chord when those points are nearly antipodal.
+    struct OrthArc
+    {
+        Vector2 a;
+        Vector2 b;
+        bool chord = false;
+        Vector2 m{0.0f, 0.0f};
+        float rho = 0.0f;
+        float ang0 = 0.0f;
+        float sweep = 0.0f;
+        float length = 0.0f;
+    };
+
+    OrthArc MakeOrthArc(Vector2 center, float radius, Vector2 prev, Vector2 next)
+    {
+        OrthArc arc;
+        arc.a = BoundaryToward(center, prev, radius);
+        arc.b = BoundaryToward(center, next, radius);
+        const Vector2 mid{(arc.a.x + arc.b.x) * 0.5f, (arc.a.y + arc.b.y) * 0.5f};
+        const float midDist = Dist2(mid, center);
+        if (midDist < radius * 0.04f) {
+            arc.chord = true;
+            arc.length = Dist2(arc.a, arc.b);
+            return arc;
+        }
+        const Vector2 dir{(mid.x - center.x) / midDist, (mid.y - center.y) / midDist};
+        const float t = radius * radius / midDist;
+        arc.m = Vector2{center.x + dir.x * t, center.y + dir.y * t};
+        arc.rho = Dist2(arc.m, arc.a);
+        arc.ang0 = std::atan2(arc.a.y - arc.m.y, arc.a.x - arc.m.x);
+        const float ang1 = std::atan2(arc.b.y - arc.m.y, arc.b.x - arc.m.x);
+        float sweep = std::fmod(ang1 - arc.ang0 + 2.0f * kTwoPi, kTwoPi);
+        const float midAngle = arc.ang0 + sweep * 0.5f;
+        const Vector2 arcMid{arc.m.x + arc.rho * std::cos(midAngle),
+                             arc.m.y + arc.rho * std::sin(midAngle)};
+        if (Dist2(arcMid, center) > radius) {
+            sweep -= kTwoPi;
+        }
+        arc.sweep = sweep;
+        arc.length = std::fabs(sweep) * arc.rho;
+        return arc;
+    }
+
+    Vector2 PointOnArc(const OrthArc& arc, float u)
+    {
+        if (arc.chord || arc.rho < 1e-6f) {
+            return Vector2{arc.a.x + (arc.b.x - arc.a.x) * u, arc.a.y + (arc.b.y - arc.a.y) * u};
+        }
+        const float ang = arc.ang0 + arc.sweep * u;
+        return Vector2{arc.m.x + arc.rho * std::cos(ang), arc.m.y + arc.rho * std::sin(ang)};
+    }
+
+    // `centers` includes the outer neighbor at each end. Arcs are sampled on
+    // every bead strictly between those neighbors.
+    void SampleOrthogonalComposite(const std::vector<Vector2>& centers, float radius, int n,
+                                   std::vector<Vector2>* out)
+    {
+        const Vector2 fallback = centers.empty() ? Vector2{0.0f, 0.0f} : centers.front();
+        out->assign(static_cast<size_t>(std::max(n, 0)), fallback);
+        if (centers.size() < 3 || n < 2) {
+            return;
+        }
+        std::vector<OrthArc> arcs;
+        arcs.reserve(centers.size() - 2);
+        for (size_t i = 1; i + 1 < centers.size(); ++i) {
+            arcs.push_back(MakeOrthArc(centers[i], radius, centers[i - 1], centers[i + 1]));
+        }
+        std::vector<float> cum(arcs.size() + 1, 0.0f);
+        for (size_t i = 0; i < arcs.size(); ++i) {
+            cum[i + 1] = cum[i] + arcs[i].length;
+        }
+        const float total = cum.back();
+        if (total < 1e-6f) {
+            std::fill(out->begin(), out->end(), arcs.front().a);
+            out->back() = arcs.back().b;
+            return;
+        }
+        size_t seg = 0;
+        for (int k = 0; k < n; ++k) {
+            const float target = total * (static_cast<float>(k) / static_cast<float>(n - 1));
+            while (seg + 1 < arcs.size() && cum[seg + 1] < target) {
+                ++seg;
+            }
+            const float span = arcs[seg].length;
+            const float u = (span < 1e-6f) ? 0.0f : (target - cum[seg]) / span;
+            (*out)[static_cast<size_t>(k)] = PointOnArc(arcs[seg], std::max(0.0f, std::min(1.0f, u)));
+        }
+        out->front() = arcs.front().a;
+        out->back() = arcs.back().b;
+    }
+}
+
+bool Physics::BeginR3Homotopy()
+{
+    if (structureDirty_) {
+        RebuildStructures();
+    }
+
+    int sideBead[3] = {-1, -1, -1};
+    for (int i = 0; i < 3; ++i) {
+        const int next = (i + 1) % 3;
+        const std::vector<int> chain =
+            WalkSideChain(r3Info_.vertexBead[i], r3Info_.h[i]);
+        if (static_cast<int>(chain.size()) != 3 ||
+            chain.back() != r3Info_.vertexBead[next] ||
+            neck_->beads[static_cast<size_t>(chain[1])].isVertex) {
+            return false;
+        }
+        sideBead[i] = chain[1];
+    }
+
+    r3HomotopyHidden_.clear();
+    for (int i = 0; i < 3; ++i) {
+        const int prev = (i + 2) % 3;
+        const int next = (i + 1) % 3;
+        const int xi = r3Info_.vertexBead[i];
+        const int xNext = r3Info_.vertexBead[next];
+        const int xOpp = r3Info_.vertexBead[prev];
+
+        const std::vector<int> incoming = WalkSideChain(xi, r3Info_.a[i]);
+        const std::vector<int> outgoing = WalkSideChain(xNext, r3Info_.b[next]);
+        if (incoming.size() < 3 || outgoing.size() < 3 || incoming.front() != xi ||
+            outgoing.front() != xNext) {
+            return false;
+        }
+        const int eIn = incoming[1];
+        const int outerIn = incoming[2];
+        const int eOut = outgoing[1];
+        const int outerOut = outgoing[2];
+        if (neck_->beads[static_cast<size_t>(eIn)].isVertex ||
+            neck_->beads[static_cast<size_t>(eOut)].isVertex) {
+            return false;
+        }
+
+        // Centers, including the neighbor just outside E_in / E_out. Samples
+        // lie on the orthogonal arcs of the beads between those neighbors.
+        const std::vector<Vector2> centersP{
+            PosOf(outerIn), PosOf(eIn), PosOf(xi), PosOf(sideBead[i]),
+            PosOf(xNext),   PosOf(eOut), PosOf(outerOut)};
+        const std::vector<Vector2> centersQ{
+            PosOf(outerIn), PosOf(eIn), PosOf(sideBead[prev]), PosOf(xOpp),
+            PosOf(sideBead[next]), PosOf(eOut), PosOf(outerOut)};
+        const int subdivisions = std::max(kR3HomotopySubdivisions, 2);
+        SampleOrthogonalComposite(centersP, radius_, subdivisions, &r3HomotopyP_[i]);
+        SampleOrthogonalComposite(centersQ, radius_, subdivisions, &r3HomotopyQ_[i]);
+        const int strand = StrandOfEdgeLabel(std::abs(r3Info_.h[i]));
+        r3HomotopyStrand_[i] = (strand >= 0) ? strand : 0;
+
+        r3HomotopyHidden_.insert(xi);
+        r3HomotopyHidden_.insert(sideBead[i]);
+        r3HomotopyHidden_.insert(eIn);
+        r3HomotopyHidden_.insert(eOut);
+    }
+    r3HomotopyStep_ = 0;
+    r3Phase_ = R3Phase::Homotopy;
+    return true;
+}
+
+void Physics::R3HomotopyStep()
+{
+    const int frames = std::max(kR3HomotopyFrames, 2);
+    if (r3HomotopyStep_ + 1 < frames) {
+        ++r3HomotopyStep_;
+        return;
+    }
+    // t = 1 has been shown. Finish the slide before the next draw so the
+    // cut triangle and its face bead are never a displayed frame.
+    if (!BeginR3Slide()) {
+        CancelR3Move();
+        return;
+    }
+    FinishR3SlideNow();
+}
+
+void Physics::BeginR3HomotopyOrSlide()
+{
+    if (BeginR3Homotopy()) {
+        return;
+    }
+    if (!BeginR3Slide()) {
+        CancelR3Move();
+    }
+}
+
+bool Physics::R3HomotopyActive() const
+{
+    return r3Active_ && r3Phase_ == R3Phase::Homotopy;
+}
+
+bool Physics::R3HomotopyHidesBead(int bead) const
+{
+    return R3HomotopyActive() && r3HomotopyHidden_.count(bead) != 0;
+}
+
+void Physics::R3HomotopyPolylines(std::vector<std::vector<Vector2>>* points,
+                                  std::vector<int>* strands) const
+{
+    if (points == nullptr || strands == nullptr) {
+        return;
+    }
+    points->clear();
+    strands->clear();
+    if (!R3HomotopyActive()) {
+        return;
+    }
+    for (int i = 0; i < 3; ++i) {
+        const std::vector<Vector2>& p = r3HomotopyP_[i];
+        const std::vector<Vector2>& q = r3HomotopyQ_[i];
+        if (p.size() < 2 || p.size() != q.size()) {
+            continue;
+        }
+        const int frames = std::max(kR3HomotopyFrames, 2);
+        const float t = static_cast<float>(r3HomotopyStep_) / static_cast<float>(frames - 1);
+        std::vector<Vector2> arc(p.size());
+        for (size_t k = 0; k < p.size(); ++k) {
+            arc[k].x = p[k].x + (q[k].x - p[k].x) * t;
+            arc[k].y = p[k].y + (q[k].y - p[k].y) * t;
+        }
+        arc.front() = p.front();
+        arc.back() = p.back();
+        points->push_back(std::move(arc));
+        strands->push_back(r3HomotopyStrand_[i]);
     }
 }
 
@@ -4318,11 +4572,20 @@ void Physics::R3Step()
         R3FortifyStep();
         return;
     }
+    if (r3Phase_ == R3Phase::Homotopy) {
+        R3HomotopyStep();
+        return;
+    }
     if (r3Phase_ == R3Phase::PostRepair) {
         R3PostRepairStep();
         return;
     }
 
+    R3SlideStep();
+}
+
+void Physics::R3SlideStep()
+{
     for (int i = 0; i < params_->autoStepsPerFrame; ++i) {
         Step();
     }
@@ -4378,6 +4641,16 @@ void Physics::R3Step()
         r3StallFrames_ = 0;
     }
     else if (++r3StallFrames_ > 240) {
+        CancelR3Move();
+    }
+}
+
+void Physics::FinishR3SlideNow()
+{
+    for (int guard = 0; guard < 8000 && r3Active_ && !r3Complete_; ++guard) {
+        R3SlideStep();
+    }
+    if (r3Active_ && !r3Complete_) {
         CancelR3Move();
     }
 }

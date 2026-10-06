@@ -104,7 +104,14 @@ public:
     void CancelR3Move();
     bool R3Active() const { return r3Active_; }
     bool R3Complete() const { return r3Complete_; }
-    // Advance the pre-honeycomb / sliding animation by one displayed frame.
+    // Draw-only morph of the three strands after the honeycomb and before the slide.
+    bool R3HomotopyActive() const;
+    // Beads whose orthogonal arcs are replaced by the morph polylines.
+    bool R3HomotopyHidesBead(int bead) const;
+    // Current frame of the morph, in grid coordinates, with the strand of |h[i]|.
+    void R3HomotopyPolylines(std::vector<std::vector<Vector2>>* points,
+                             std::vector<int>* strands) const;
+    // Advance the pre-honeycomb / homotopy / sliding animation by one displayed frame.
     void R3Step();
     // Valid once R3Complete(): the analyzed face and the meeting bead on each
     // side (the new crossing between X_i and X_{i+1} sits at meeting[i]).
@@ -317,12 +324,14 @@ private:
     // ---- Reidemeister 3 state machine ----
     // Phase A: tighten the triangle to a honeycomb (one edge bead per side).
     // Phase A2: hex-spoke springs from the face bead to the 6-cycle.
+    // Phase A3: draw-only arc-length homotopy of the three strands (physics frozen).
     // Phase B: cut-and-slide terminals toward those three beads (meetings).
     // Phase C: after FinalizeR3, fill gaps then strip sharp bends.
     enum class R3Phase
     {
         PreHoneycomb,
         Fortify,
+        Homotopy,
         Slide,
         PostRepair
     };
@@ -354,7 +363,12 @@ private:
     bool R3SliderSettled(const R3Slider& s) const;
     void AdvanceR3Slider(R3Slider& s);
     void R3PreHoneycombStep();
+    bool BeginR3Homotopy();
+    void R3HomotopyStep();
+    void BeginR3HomotopyOrSlide();
     bool BeginR3Slide();
+    void R3SlideStep();
+    void FinishR3SlideNow();
     bool BindR3HoneycombSpokes();
     bool R3HoneycombSpokesActive() const;
     bool R3HoneycombSpokesSettled() const;
@@ -491,6 +505,12 @@ private:
     int r3SettleEdge_ = -1;
     float r3SettleLength_ = 0.0f;
     int r3SettleFrames_ = 0;
+    // Arc-length samples of each strand at t = 0 (P) and t = 1 (Q), grid space.
+    std::vector<Vector2> r3HomotopyP_[3];
+    std::vector<Vector2> r3HomotopyQ_[3];
+    int r3HomotopyStrand_[3] = {0, 0, 0};
+    int r3HomotopyStep_ = 0;
+    std::unordered_set<int> r3HomotopyHidden_;
     // Packed 6-spoke truss for every 1-/2-/3-gon with 6 boundary beads.
     std::vector<int> honeycombFaceFi_;
     std::vector<int> honeycombSpokes_;

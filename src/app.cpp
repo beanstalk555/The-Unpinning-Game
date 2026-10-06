@@ -2592,12 +2592,24 @@ namespace
 
         const Multiloop& loop = *app.loop;
 
+        std::vector<std::vector<Vector2>> homotopyPolys;
+        std::vector<int> homotopyStrands;
+        const bool homotopyActive = app.physics && app.physics->R3HomotopyActive();
+        if (homotopyActive) {
+            app.physics->R3HomotopyPolylines(&homotopyPolys, &homotopyStrands);
+        }
+
         // The multiloop itself: orthogonal circle arcs within each bead,
         // drawn strand by strand so higher-index strands always lie on top.
         for (int strand = 0; strand < loop.numStrands; ++strand) {
             const Color color = StrandColor(strand);
-            for (const Bead& bead : necklace.beads) {
+            for (size_t bi = 0; bi < necklace.beads.size(); ++bi) {
+                const Bead& bead = necklace.beads[bi];
                 if (bead.removed) {
+                    continue;
+                }
+                if (homotopyActive &&
+                    app.physics->R3HomotopyHidesBead(static_cast<int>(bi))) {
                     continue;
                 }
                 const Vector2 c = toScreen(bead.pos);
@@ -2654,6 +2666,19 @@ namespace
                     const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
                     DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
                                       TangentPoint(c, beadRadius, n1), thickness, color);
+                }
+            }
+            if (homotopyActive) {
+                for (size_t a = 0; a < homotopyPolys.size(); ++a) {
+                    if (homotopyStrands[a] != strand) {
+                        continue;
+                    }
+                    const std::vector<Vector2>& pts = homotopyPolys[a];
+                    for (size_t k = 0; k + 1 < pts.size(); ++k) {
+                        const Vector2 s0 = view.ToScreen(BeadPos{pts[k].x, pts[k].y});
+                        const Vector2 s1 = view.ToScreen(BeadPos{pts[k + 1].x, pts[k + 1].y});
+                        DrawLineEx(s0, s1, thickness, color);
+                    }
                 }
             }
         }
