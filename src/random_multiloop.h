@@ -26,3 +26,10 @@ struct RandomMultiloop
 // Throws std::runtime_error if generation fails.
 RandomMultiloop GenerateRandomMultiloop(int minFaces, double density, bool forceOneStrand,
                                         bool forceSimple, unsigned seed);
+
+// One-strand diagram from 10 points at density 0.8 with an odd crossing
+// count. One strand comes from the bigon hooks inside
+// GenerateRandomMultiloop. A sample is drawn again only when the
+// even-crossing resolution fails or leaves an empty unknot. Throws
+// std::runtime_error if no sample qualifies.
+RandomMultiloop MakeOddOneStrandMultiloop(unsigned seed);

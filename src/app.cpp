@@ -31,15 +31,10 @@
 #include "r2_move.h"
 #include "r3_move.h"
 #include "random_multiloop.h"
+#include "unpinning_game.h"
 
 namespace
 {
-    const char* kExampleSigma =
-        "(6,1,-7,-2)(11,2,-12,-3)(16,3,-17,-4)(12,7,-13,-8)(17,8,-18,-9)"
-        "(4,9,-5,-10)(18,13,-1,-14)(5,14,-6,-15)(10,15,-11,-16)";
-    // Unbounded face (5, 9, 18, 14) of kExampleSigma.
-    constexpr int kExampleExteriorHalfEdge = 5;
-
     const Color kBackground = {245, 245, 248, 255};
     const Color kHighlightFill = {255, 220, 40, 90};
     const Color kTextDark = {40, 42, 48, 255};
@@ -94,6 +89,17 @@ namespace
     bool gFontLoaded = false;
     bool gFontBoldLoaded = false;
 
+    // ASCII plus the infinity sign used by the move-allowance dropdown.
+    void FillUiCodepoints(int* codepoints, int* count)
+    {
+        int n = 0;
+        for (int cp = 32; cp <= 126; ++cp) {
+            codepoints[n++] = cp;
+        }
+        codepoints[n++] = 0x221E;
+        *count = n;
+    }
+
     void LoadUiFont()
     {
         const char* candidates[] = {
@@ -106,9 +112,12 @@ namespace
             "C:/Windows/Fonts/calibrib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
         };
+        int codepoints[128];
+        int codepointCount = 0;
+        FillUiCodepoints(codepoints, &codepointCount);
         for (const char* path : candidates) {
             if (FileExists(path)) {
-                gFont = LoadFontEx(path, 64, nullptr, 0);
+                gFont = LoadFontEx(path, 64, codepoints, codepointCount);
                 if (gFont.texture.id != 0) {
                     SetTextureFilter(gFont.texture, TEXTURE_FILTER_BILINEAR);
                     gFontLoaded = true;
@@ -121,7 +130,7 @@ namespace
         }
         for (const char* path : boldCandidates) {
             if (FileExists(path)) {
-                gFontBold = LoadFontEx(path, 64, nullptr, 0);
+                gFontBold = LoadFontEx(path, 64, codepoints, codepointCount);
                 if (gFontBold.texture.id != 0) {
                     SetTextureFilter(gFontBold.texture, TEXTURE_FILTER_BILINEAR);
                     gFontBoldLoaded = true;
@@ -648,12 +657,12 @@ namespace
 
         void ClearR3Undo() { r3Undo.clear(); }
 
-        void PushR3Undo()
+        R3UndoSnapshot CaptureSnapshot() const
         {
-            if (!layout || !necklace) {
-                return;
-            }
             R3UndoSnapshot snap;
+            if (!layout || !necklace) {
+                return snap;
+            }
             if (loop) {
                 snap.loop.reset(new Multiloop(*loop));
             }
@@ -668,22 +677,34 @@ namespace
             snap.viewLookY = viewLookY;
             snap.viewAngle = viewAngle;
             snap.viewGridHeight = viewGridHeight;
-            r3Undo.push_back(std::move(snap));
-            while (static_cast<int>(r3Undo.size()) > kR3UndoLimit) {
-                r3Undo.pop_front();
-            }
+            return snap;
         }
 
-        void UndoR3()
+        static R3UndoSnapshot CloneSnapshot(const R3UndoSnapshot& src)
         {
-            if (r3Undo.empty()) {
-                return;
+            R3UndoSnapshot dst;
+            if (src.loop) {
+                dst.loop.reset(new Multiloop(*src.loop));
             }
+            dst.components = src.components;
+            dst.layout = src.layout;
+            dst.necklace = src.necklace;
+            dst.unknotMode = src.unknotMode;
+            dst.selectedFace = src.selectedFace;
+            dst.exteriorHighlighted = src.exteriorHighlighted;
+            dst.viewCell = src.viewCell;
+            dst.viewLookX = src.viewLookX;
+            dst.viewLookY = src.viewLookY;
+            dst.viewAngle = src.viewAngle;
+            dst.viewGridHeight = src.viewGridHeight;
+            return dst;
+        }
+
+        void ApplySnapshot(R3UndoSnapshot snap)
+        {
             if (physics && physics->AutoTightening()) {
                 physics->StopAutoTighten();
             }
-            R3UndoSnapshot snap = std::move(r3Undo.back());
-            r3Undo.pop_back();
             if (!snap.unknotMode && !snap.loop) {
                 return;
             }
@@ -737,6 +758,46 @@ namespace
             }
         }
 
+        void PushR3Undo()
+        {
+            if (!layout || !necklace) {
+                return;
+            }
+            r3Undo.push_back(CaptureSnapshot());
+            while (static_cast<int>(r3Undo.size()) > kR3UndoLimit) {
+                r3Undo.pop_front();
+            }
+        }
+
+        void UndoR3()
+        {
+            if (r3Undo.empty()) {
+                return;
+            }
+            R3UndoSnapshot snap = std::move(r3Undo.back());
+            r3Undo.pop_back();
+            ApplySnapshot(std::move(snap));
+        }
+
+        R3UndoSnapshot gameStart_;
+        bool gameStartValid_ = false;
+        bool pendingGameFit = false;
+        UnpinningGame game;
+
+        void RememberGameStart()
+        {
+            gameStart_ = CaptureSnapshot();
+            gameStartValid_ = layout && necklace;
+        }
+
+        void RestoreGameStart()
+        {
+            if (!gameStartValid_) {
+                return;
+            }
+            ApplySnapshot(CloneSnapshot(gameStart_));
+        }
+
         // Free-hand drawing mode.
         bool drawing = false;
         std::vector<std::vector<Vector2>> drawCurves; // completed closed curves
@@ -753,14 +814,33 @@ namespace
 
         App()
         {
-            sigmaBox.text = kExampleSigma;
             countBox.text = "10";
+            StartRandomOddMatch();
+        }
+
+        void StartRandomOddMatch()
+        {
+            RandomMultiloop random;
+            try {
+                random = MakeOddOneStrandMultiloop(rng());
+            }
+            catch (const std::exception& e) {
+                error = e.what();
+                return;
+            }
+            sigmaBox.text = random.sigma.ToString();
             SubmitSigma();
-            if (loop) {
-                SelectFaceContaining(kExampleExteriorHalfEdge);
-                if (physics) {
-                    physics->StartAutoTighten();
-                }
+            if (!loop) {
+                return;
+            }
+            SelectFaceContaining(random.exteriorHalfEdge);
+            if (!layout || !necklace || !physics) {
+                return;
+            }
+            PinEveryFaceBead();
+            BeginUnpinningMatch();
+            if (!physics->MoveActive() && !physics->AutoTightening()) {
+                physics->StartAutoTighten();
             }
         }
 
@@ -1147,10 +1227,10 @@ namespace
         // Swap in the rewritten multiloop once the R3 slide has converged.
         // The necklace keeps its bead positions; only topology and labels
         // change, so the picture is undisturbed.
-        void CompleteR3Move()
+        bool CompleteR3Move()
         {
             if (!physics || !loop || !necklace) {
-                return;
+                return false;
             }
             R3FaceInfo info;
             int meeting[3] = {-1, -1, -1};
@@ -1161,7 +1241,7 @@ namespace
                 FinalizeR3(*loop, *necklace, info, meeting, oldExteriors, &newExteriors);
             if (!newLoop) {
                 physics->CancelR3Move();
-                return;
+                return false;
             }
             physics->EnsureR3ExteriorHoneycombMins(*newLoop);
             physics.reset();
@@ -1208,7 +1288,9 @@ namespace
             catch (const std::exception& e) {
                 physics.reset();
                 error = e.what();
+                return false;
             }
+            return true;
         }
 
         // True when some component sits inside `face` (a region with holes).
@@ -1301,20 +1383,20 @@ namespace
 
         // Start R0/R1/R2/R3 from an unpinned region. No-op if the move is
         // invalid (busy physics, nested components, wrong degree, etc.).
-        void TryStartReidemeisterFromFaceBead(int fi)
+        bool TryStartReidemeisterFromFaceBead(int fi)
         {
             if (!physics || !necklace || fi < 0 ||
                 fi >= static_cast<int>(necklace->faceBeads.size())) {
-                return;
+                return false;
             }
             const FaceBead& fb = necklace->faceBeads[static_cast<size_t>(fi)];
             const bool idle = !physics->AutoTightening() && !physics->MoveActive();
             if (!idle) {
-                return;
+                return false;
             }
             const MoveHint hint = FaceBeadMoveHint(fb);
             if (hint == MoveHint::None) {
-                return;
+                return false;
             }
             PushR3Undo();
             bool started = false;
@@ -1333,6 +1415,7 @@ namespace
             if (!started && !r3Undo.empty()) {
                 r3Undo.pop_back();
             }
+            return started;
         }
 
         void TryStartReidemeisterAt(Vector2 gridPos)
@@ -1345,6 +1428,17 @@ namespace
                 return;
             }
             TryStartReidemeisterFromFaceBead(region);
+        }
+
+        // Pins every face bead, including circle pads, without an undo snapshot.
+        void PinEveryFaceBead()
+        {
+            if (!necklace) {
+                return;
+            }
+            for (FaceBead& fb : necklace->faceBeads) {
+                fb.pinned = true;
+            }
         }
 
         void SetAllPinned(bool value)
@@ -1365,6 +1459,186 @@ namespace
             PushR3Undo();
             for (FaceBead& fb : necklace->faceBeads) {
                 fb.pinned = value;
+            }
+        }
+
+        bool AnyPinned() const
+        {
+            if (!necklace) {
+                return false;
+            }
+            for (const FaceBead& fb : necklace->faceBeads) {
+                if (fb.pinned) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        std::string RegionLogName(const FaceBead& fb) const
+        {
+            if (fb.face >= 0) {
+                return "region " + std::to_string(fb.label);
+            }
+            const int strand = necklace ? CirclePadStrand(*necklace, fb) : -1;
+            if (strand >= 0) {
+                return "circle strand " + std::to_string(strand);
+            }
+            return "circle " + std::to_string(fb.label);
+        }
+
+        std::string DescribeStartingPins() const
+        {
+            if (!necklace) {
+                return "none";
+            }
+            std::vector<std::pair<int, std::string>> items;
+            for (const FaceBead& fb : necklace->faceBeads) {
+                if (!fb.pinned) {
+                    continue;
+                }
+                if (fb.face >= 0) {
+                    items.push_back({fb.label, "region " + std::to_string(fb.label)});
+                }
+                else {
+                    const int strand = CirclePadStrand(*necklace, fb);
+                    const int key = 100000 + (strand >= 0 ? strand : fb.label);
+                    items.push_back({key, RegionLogName(fb)});
+                }
+            }
+            if (items.empty()) {
+                return "none";
+            }
+            std::sort(items.begin(), items.end());
+            std::string out;
+            for (size_t i = 0; i < items.size(); ++i) {
+                if (i > 0) {
+                    out += ", ";
+                }
+                out += items[i].second;
+            }
+            return out;
+        }
+
+        std::string InfiniteRegionText() const
+        {
+            if (selectedFace >= 0 && selectedFace < static_cast<int>(faceLabels.size())) {
+                return faceLabels[static_cast<size_t>(selectedFace)];
+            }
+            if (unknotMode) {
+                return "()";
+            }
+            return "(none)";
+        }
+
+        static UnpinningGame::MoveKind HintToKind(MoveHint hint)
+        {
+            if (hint == MoveHint::R1) {
+                return UnpinningGame::MoveKind::R1;
+            }
+            if (hint == MoveHint::R2) {
+                return UnpinningGame::MoveKind::R2;
+            }
+            if (hint == MoveHint::R3) {
+                return UnpinningGame::MoveKind::R3;
+            }
+            return UnpinningGame::MoveKind::R0;
+        }
+
+        void BeginUnpinningMatch()
+        {
+            if (!layout || !necklace) {
+                return;
+            }
+            RememberGameStart();
+            ClearR3Undo();
+            dropdownOpen = false;
+            tuningUI.open = false;
+            game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
+            pendingGameFit = true;
+        }
+
+        void ReplayUnpinningMatch()
+        {
+            RestoreGameStart();
+            PinEveryFaceBead();
+            ClearR3Undo();
+            dropdownOpen = false;
+            tuningUI.open = false;
+            game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
+            RequestViewFit();
+        }
+
+        void ConfirmExitToSandbox()
+        {
+            game.MarkEarlyExit();
+            ClearR3Undo();
+            dropdownOpen = false;
+            RequestViewFit();
+        }
+
+        void BackToSandboxFromGame()
+        {
+            RestoreGameStart();
+            ClearR3Undo();
+            game.Deactivate();
+            dropdownOpen = false;
+            RequestViewFit();
+        }
+
+        void HandleGameClick(Vector2 gridMouse, float pickDist)
+        {
+            if (!game.Active() || game.ExitPrompt() || game.Over() || !physics || !necklace) {
+                return;
+            }
+            if (physics->MoveActive() || physics->AutoTightening() || physics->Dragging()) {
+                return;
+            }
+            const int body = physics->PickBody(gridMouse, pickDist);
+            const int beadCount = static_cast<int>(necklace->beads.size());
+            if (body >= beadCount) {
+                const int fi = body - beadCount;
+                if (fi >= 0 && fi < static_cast<int>(necklace->faceBeads.size())) {
+                    FaceBead& fb = necklace->faceBeads[static_cast<size_t>(fi)];
+                    if (fb.pinned && game.AcceptsPinRemoval()) {
+                        const std::string name = RegionLogName(fb);
+                        fb.pinned = false;
+                        game.OnPinRemoved(name);
+                        return;
+                    }
+                }
+            }
+            if (!game.AcceptsMove()) {
+                return;
+            }
+            const int region = physics->PickRegionAt(gridMouse);
+            if (region < 0 || region >= static_cast<int>(necklace->faceBeads.size())) {
+                return;
+            }
+            const FaceBead& fb = necklace->faceBeads[static_cast<size_t>(region)];
+            const MoveHint hint = FaceBeadMoveHint(fb);
+            if (hint == MoveHint::None) {
+                return;
+            }
+            const std::string name = RegionLogName(fb);
+            if (!TryStartReidemeisterFromFaceBead(region)) {
+                return;
+            }
+            game.OnMoveStarted(HintToKind(hint), name);
+        }
+
+        void ResolveTangleReset()
+        {
+            game.OnResetPressed();
+            ResetToGrid();
+            bool started = false;
+            if (physics && !physics->MoveActive() && !physics->AutoTightening()) {
+                physics->StartAutoTighten();
+                started = physics->AutoTightening();
+            }
+            if (!started && physics) {
+                physics->RefreshTangle();
+                game.OnSettled(physics->Tangled(), AnyPinned(), GetTime());
             }
         }
 
@@ -1445,10 +1719,10 @@ namespace
             }
         }
 
-        void CompleteR1Move()
+        bool CompleteR1Move()
         {
             if (!physics || !loop || !necklace) {
-                return;
+                return false;
             }
             R1FaceInfo info;
             physics->GetR1Result(&info);
@@ -1457,15 +1731,16 @@ namespace
                 FinalizeR1(*loop, *necklace, info, components, &result);
             if (!newLoop) {
                 physics->CancelMove();
-                return;
+                return false;
             }
             CompleteShorteningMove(std::move(newLoop), result);
+            return static_cast<bool>(physics);
         }
 
-        void CompleteR2Move()
+        bool CompleteR2Move()
         {
             if (!physics || !loop || !necklace) {
-                return;
+                return false;
             }
             R2FaceInfo info;
             physics->GetR2Result(&info);
@@ -1474,9 +1749,10 @@ namespace
                 FinalizeR2(*loop, *necklace, info, components, &result);
             if (!newLoop) {
                 physics->CancelMove();
-                return;
+                return false;
             }
             CompleteShorteningMove(std::move(newLoop), result);
+            return static_cast<bool>(physics);
         }
 
         // Empty canvas after the last circle pops. Leaves the undo stack intact.
@@ -1513,22 +1789,29 @@ namespace
             }
         }
 
-        void CompleteR0Move()
+        enum class MoveFinish
+        {
+            Failed,
+            Done,
+            Cleared
+        };
+
+        MoveFinish CompleteR0Move()
         {
             if (!physics || !necklace) {
-                return;
+                return MoveFinish::Failed;
             }
             R0MoveInfo info;
             physics->GetR0Result(&info);
             if (!FinalizeR0(*necklace, info, &components)) {
                 physics->CancelMove();
-                return;
+                return MoveFinish::Failed;
             }
             physics.reset();
             debugFaceBeadIndex = -1;
             if (components.empty()) {
                 ClearDiagramKeepUndo();
-                return;
+                return MoveFinish::Cleared;
             }
             SyncSigmaText();
             bool allCircles = true;
@@ -1555,7 +1838,9 @@ namespace
             catch (const std::exception& e) {
                 physics.reset();
                 error = e.what();
+                return MoveFinish::Failed;
             }
+            return MoveFinish::Done;
         }
 
         void SelectFaceContaining(int halfEdge)
@@ -2770,6 +3055,39 @@ namespace
         }
     }
 
+    std::vector<std::string> WrapText(const Font& font, const std::string& text, float size,
+                                      float maxWidth)
+    {
+        std::vector<std::string> lines;
+        std::string line;
+        std::string word;
+        for (size_t i = 0; i <= text.size(); ++i) {
+            const char c = (i < text.size()) ? text[i] : ' ';
+            if (c != ' ') {
+                word.push_back(c);
+                continue;
+            }
+            if (word.empty()) {
+                continue;
+            }
+            const std::string trial = line.empty() ? word : line + " " + word;
+            if (TextWidthFont(font, trial, size) <= maxWidth) {
+                line = trial;
+            }
+            else {
+                if (!line.empty()) {
+                    lines.push_back(line);
+                }
+                line = word;
+            }
+            word.clear();
+        }
+        if (!line.empty()) {
+            lines.push_back(line);
+        }
+        return lines;
+    }
+
     // ----------------------------------------------------------------
     // Per-frame UI.
     // ----------------------------------------------------------------
@@ -2782,12 +3100,33 @@ namespace
         const bool click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
         const bool rightClick = IsMouseButtonPressed(MOUSE_BUTTON_RIGHT);
 
+        app.game.Tick(GetTime());
+        const bool inGame = app.game.Active();
+        const bool gameOver = inGame && app.game.Over();
+        if (inGame && IsKeyPressed(KEY_ESCAPE)) {
+            if (app.game.RulesOpen()) {
+                app.game.CloseRules();
+            }
+            else if (app.game.ExitPrompt()) {
+                app.game.DismissExit();
+            }
+            else if (!gameOver) {
+                app.game.AskExit();
+            }
+        }
+        if (inGame && app.pendingGameFit) {
+            app.pendingGameFit = false;
+            app.RequestViewFit();
+        }
+
         const float pad = 10.0f;
         const float row0 = pad;
         const float row1 = pad + 40.0f;
         const float row2 = row1 + 42.0f;
         const float row3 = row2 + 38.0f;
-        const float canvasTop = row3 + 36.0f;
+        const float row4 = row3 + 38.0f;
+        const float gameBarH = 72.0f;
+        const float canvasTop = gameOver ? 0.0f : (inGame ? gameBarH : (row4 + 36.0f));
         const Rectangle canvas = {0.0f, canvasTop, static_cast<float>(screenWidth),
                                   static_cast<float>(screenHeight) - canvasTop};
 
@@ -2812,6 +3151,11 @@ namespace
             return click && CheckCollisionPointRec(mouse, Rectangle{bx, row0, w, 30.0f});
         };
 
+        Rectangle dropdownBox = {0.0f, 0.0f, 0.0f, 0.0f};
+        Rectangle allowanceBox = {0.0f, 0.0f, 0.0f, 0.0f};
+        bool uiHoldsClick = false;
+
+        if (!inGame) {
         // ---- Row 0: draw / generate ----
         float x = pad;
         if (!drawing) {
@@ -2844,8 +3188,8 @@ namespace
             x += w + 12.0f;
 
             const Color labelColor = drawing ? kTextDim : kTextDark;
-            DrawTextS("with at least", x, row0 + 6.0f, 18.0f, labelColor);
-            x += TextWidth("with at least", 18.0f) + 8.0f;
+            DrawTextS("with approximately", x, row0 + 6.0f, 18.0f, labelColor);
+            x += TextWidth("with approximately", 18.0f) + 8.0f;
             const Rectangle countRect = {x, row0 + 1.0f, 56.0f, 28.0f};
             if (TextBoxFrame(app.countBox, countRect, 17.0f, mouse, click, true, !drawing) && !drawing) {
                 app.GenerateRandom();
@@ -2933,7 +3277,7 @@ namespace
         // ---- Row 2: infinite face dropdown ----
         const std::string facePrompt = "Choose infinite face:";
         DrawTextS(facePrompt, pad, row2 + 4.0f, 20.0f, drawing ? kTextDim : kTextDark);
-        const Rectangle dropdownBox = {pad + TextWidth(facePrompt, 20.0f) + 12.0f, row2, 360.0f, 30.0f};
+        dropdownBox = {pad + TextWidth(facePrompt, 20.0f) + 12.0f, row2, 360.0f, 30.0f};
         if (!drawing && click && CheckCollisionPointRec(mouse, dropdownBox) && !app.faceLabels.empty()) {
             app.dropdownOpen = !app.dropdownOpen;
             if (app.dropdownOpen && app.selectedFace >= 0) {
@@ -2942,6 +3286,7 @@ namespace
         }
         if (IsKeyPressed(KEY_ESCAPE)) {
             app.dropdownOpen = false;
+            app.game.CloseAllowanceMenu();
         }
         {
             DrawRectangleRec(dropdownBox, app.faceLabels.empty() ? kBackground : WHITE);
@@ -3134,9 +3479,168 @@ namespace
             }
         }
 
+        // ---- Row 4: start a match on the open diagram ----
+        {
+            const std::string playLabel = "Play the Unpinning Game";
+            const float playFont = 18.0f;
+            const float playW = TextWidthFont(gFontBold, playLabel, playFont) + 24.0f;
+            const Rectangle playR = {pad, row4, playW, 30.0f};
+            const bool diagram = app.layout != nullptr && app.necklace != nullptr;
+            const bool busy = drawing || (app.physics && (app.physics->MoveActive() ||
+                                                          app.physics->AutoTightening() ||
+                                                          app.physics->Dragging()));
+            const bool playEnabled = diagram && !busy;
+            const bool playHover = playEnabled && CheckCollisionPointRec(mouse, playR);
+            const Color playBase = {46, 158, 78, 255};
+            const Color playFill = !playEnabled ? kDisabledFill
+                                                : (playHover ? ColorBrightness(playBase, -0.15f)
+                                                             : playBase);
+            DrawRectangleRounded(playR, 0.35f, 6, playFill);
+            DrawTextFont(gFontBold, playLabel, playR.x + 12.0f, playR.y + 5.0f, playFont,
+                         playEnabled ? WHITE : kBackground);
+            if (playEnabled && click && CheckCollisionPointRec(mouse, playR)) {
+                app.game.CloseAllowanceMenu();
+                app.BeginUnpinningMatch();
+            }
+
+            float ax = pad + playW + 12.0f;
+            const std::string lead = "on this multiloop with an allowance of";
+            DrawTextS(lead, ax, row4 + 6.0f, 18.0f, kTextDark);
+            ax += TextWidth(lead, 18.0f) + 8.0f;
+            allowanceBox = {ax, row4, 64.0f, 30.0f};
+            const bool menu = app.game.AllowanceMenuOpen();
+            if (click && CheckCollisionPointRec(mouse, allowanceBox)) {
+                app.dropdownOpen = false;
+                app.game.ToggleAllowanceMenu();
+            }
+            DrawRectangleRec(allowanceBox, WHITE);
+            DrawRectangleLinesEx(allowanceBox, 2.0f, menu ? kAccent : kBorder);
+            const std::string allowanceShown =
+                UnpinningGame::AllowanceLabel(app.game.AllowanceIndex());
+            DrawTextS(allowanceShown, allowanceBox.x + 10.0f, allowanceBox.y + 5.0f, 18.0f,
+                      kTextDark);
+            const float arrowX = allowanceBox.x + allowanceBox.width - 16.0f;
+            const float arrowY = allowanceBox.y + (menu ? 18.0f : 12.0f);
+            const float arrowDy = menu ? -6.0f : 6.0f;
+            DrawTriangle(Vector2{arrowX - 5.0f, arrowY}, Vector2{arrowX + 5.0f, arrowY},
+                         Vector2{arrowX, arrowY + arrowDy}, kTextDim);
+            ax += allowanceBox.width + 8.0f;
+            DrawTextS("Reidemeister moves per turn.", ax, row4 + 6.0f, 18.0f, kTextDark);
+        }
+        if (app.game.AllowanceMenuOpen()) {
+            const Rectangle list = {allowanceBox.x, allowanceBox.y + allowanceBox.height,
+                                    allowanceBox.width, 6.0f * 26.0f};
+            if (CheckCollisionPointRec(mouse, list)) {
+                uiHoldsClick = true;
+            }
+        }
+        if (app.dropdownOpen && !app.faceLabels.empty()) {
+            const int faceCount = static_cast<int>(app.faceLabels.size());
+            const int visibleFaces = std::min(faceCount, 14);
+            const Rectangle faceList = {dropdownBox.x, dropdownBox.y + dropdownBox.height,
+                                        dropdownBox.width, visibleFaces * 26.0f};
+            if (CheckCollisionPointRec(mouse, faceList)) {
+                uiHoldsClick = true;
+            }
+        }
+        }
+        else if (!gameOver) {
+            const float infoSize = 22.0f;
+            const float titleSize = infoSize * 2.0f;
+            const float infoY = (gameBarH - infoSize) * 0.5f;
+            const std::string title = app.game.TurnTitle();
+            const float titleW = TextWidthFont(gFontBold, title, titleSize);
+            const float boxPadX = 18.0f;
+            const float boxPadY = 8.0f;
+            const float boxW = titleW + boxPadX * 2.0f;
+            const float boxH = titleSize + boxPadY * 2.0f;
+            const float boxX = (static_cast<float>(screenWidth) - boxW) * 0.5f;
+            const float boxY = (gameBarH - boxH) * 0.5f;
+            const bool playerTwo = app.game.CurrentPlayer() == 2;
+            const Color boxFill = playerTwo ? BLACK : WHITE;
+            const Color titleColor = playerTwo ? WHITE : BLACK;
+            const Rectangle titleBox = {boxX, boxY, boxW, boxH};
+            DrawRectangleRec(titleBox, boxFill);
+            if (!playerTwo) {
+                DrawRectangleLinesEx(titleBox, 2.0f, BLACK);
+            }
+            const float titleX = boxX + boxPadX;
+            const float titleY = boxY + boxPadY;
+
+            const float rulesFont = 18.0f;
+            const std::string rulesLabel = "Rules";
+            const float rulesW = TextWidth(rulesLabel, rulesFont) + 24.0f;
+            const float rulesH = 32.0f;
+            const Rectangle rulesR = {static_cast<float>(screenWidth) - pad - rulesW,
+                                      (gameBarH - rulesH) * 0.5f, rulesW, rulesH};
+            const bool rulesEnabled = !app.game.RulesOpen() && !app.game.ExitPrompt();
+            const bool rulesHover = rulesEnabled && CheckCollisionPointRec(mouse, rulesR);
+            DrawRectangleRounded(rulesR, 0.35f, 6,
+                                 rulesHover ? ColorBrightness(kAccent, -0.15f) : kAccent);
+            DrawTextS(rulesLabel, rulesR.x + 12.0f, rulesR.y + 6.0f, rulesFont, WHITE);
+            if (rulesHover && click) {
+                app.game.OpenRules();
+            }
+
+            const std::string scores = app.game.ScoreLine();
+            const float scoreW = TextWidthFont(gFontBold, scores, infoSize);
+            const float scoreRight = rulesR.x - 16.0f;
+            const float scoreX = scoreRight - scoreW;
+            const float scoreClipL = boxX + boxW + 12.0f;
+            if (scoreX > scoreClipL) {
+                DrawTextFont(gFontBold, scores, scoreX, infoY, infoSize, kTextDark);
+            }
+            else if (scoreRight - scoreClipL > 40.0f) {
+                BeginScissorMode(static_cast<int>(scoreClipL), 0,
+                                 static_cast<int>(scoreRight - scoreClipL),
+                                 static_cast<int>(gameBarH));
+                DrawTextFont(gFontBold, scores, scoreClipL, infoY, infoSize, kTextDark);
+                EndScissorMode();
+            }
+
+            DrawTextFont(gFontBold, title, titleX, titleY, titleSize, titleColor);
+
+            const std::string detail = app.game.StatusDetail(app.AnyPinned());
+            const float leftLimit = std::max(40.0f, boxX - pad - 16.0f);
+            float detailSize = infoSize;
+            const float detailW = TextWidthFont(gFontBold, detail, infoSize);
+            if (detailW > leftLimit) {
+                detailSize = std::max(14.0f, infoSize * leftLimit / detailW);
+            }
+            const float detailY = (gameBarH - detailSize) * 0.5f;
+            BeginScissorMode(static_cast<int>(pad), 0, static_cast<int>(leftLimit),
+                             static_cast<int>(gameBarH));
+            DrawTextFont(gFontBold, detail, pad, detailY, detailSize, kTextDark);
+            EndScissorMode();
+            if (app.game.InTangle() && !app.game.RulesOpen() && !app.game.ExitPrompt()) {
+                float bx = pad + TextWidthFont(gFontBold, detail, detailSize) + 16.0f;
+                const auto tangleButton = [&](const std::string& label, bool enabled) -> bool {
+                    const float w = TextWidth(label, 18.0f) + 24.0f;
+                    if (bx + w > boxX - 8.0f) {
+                        return false;
+                    }
+                    const Rectangle r = {bx, (gameBarH - 32.0f) * 0.5f, w, 32.0f};
+                    const bool hover = enabled && CheckCollisionPointRec(mouse, r);
+                    const Color fill = !enabled ? kDisabledFill
+                                                : (hover ? ColorBrightness(kAccent, -0.15f) : kAccent);
+                    DrawRectangleRounded(r, 0.35f, 6, fill);
+                    DrawTextS(label, r.x + 12.0f, r.y + 6.0f, 18.0f, enabled ? WHITE : kBackground);
+                    bx += w + 8.0f;
+                    return enabled && click && CheckCollisionPointRec(mouse, r);
+                };
+                if (tangleButton("Undo", !app.r3Undo.empty())) {
+                    app.UndoR3();
+                    app.game.OnTangleUndone();
+                }
+                if (tangleButton("Reset", app.physics != nullptr)) {
+                    app.ResolveTangleReset();
+                }
+            }
+        }
+
         // ---- Canvas ----
         if (drawing) {
-            if (click && CheckCollisionPointRec(mouse, canvas)) {
+            if (click && !uiHoldsClick && CheckCollisionPointRec(mouse, canvas)) {
                 const double now = GetTime();
                 const bool doubleClick = (now - app.lastCanvasClick) < App::kDoubleClickTime;
                 app.lastCanvasClick = now;
@@ -3168,8 +3672,11 @@ namespace
             const bool tuningBlocks = PhysicsTuningBlocksInput(app.tuningUI, mouse);
             if (app.physics) {
                 const Vector2 gridMouse = view.ToGrid(mouse);
+                const bool blockPlay = inGame && (app.game.ExitPrompt() || app.game.Over() ||
+                                                   app.game.RulesOpen());
+                const bool allowDrag = (!inGame || app.game.AllowsDrag()) && !app.game.RulesOpen();
                 // Right-click toggles the innermost region under the cursor.
-                if (rightClick && !app.dropdownOpen && !tuningBlocks &&
+                if (rightClick && !blockPlay && !app.dropdownOpen && !tuningBlocks &&
                     CheckCollisionPointRec(mouse, canvas)) {
                     const int region = app.physics->PickRegionAt(gridMouse);
                     if (region < 0) {
@@ -3181,8 +3688,9 @@ namespace
                     }
                 }
                 // Click and drag a bead (unless interacting with the dropdown).
-                if (click && !app.dropdownOpen && !tuningBlocks &&
-                    CheckCollisionPointRec(mouse, canvas) &&
+                // A match allows dragging only while a tangle is being resolved.
+                if (allowDrag && click && !uiHoldsClick && !blockPlay && !app.dropdownOpen &&
+                    !tuningBlocks && CheckCollisionPointRec(mouse, canvas) &&
                     !app.physics->Dragging()) {
                     app.pickPressedOnCanvas = true;
                     app.pickClickPos = mouse;
@@ -3197,7 +3705,22 @@ namespace
                         app.pickClickBody = -1;
                     }
                 }
-                if (app.physics->Dragging()) {
+                else if (!allowDrag && click && !uiHoldsClick && !blockPlay && !app.dropdownOpen &&
+                         !tuningBlocks && CheckCollisionPointRec(mouse, canvas)) {
+                    const float pickDist =
+                        std::max(app.necklace->radius, 14.0f / view.cell);
+                    app.HandleGameClick(gridMouse, pickDist);
+                }
+                if (app.physics->Dragging() && !allowDrag) {
+                    app.pickClickBody = -1;
+                    app.pickPressedOnCanvas = false;
+                    app.physics->EndDrag();
+                    app.physics->RefreshTangle();
+                    if (inGame && !app.physics->Tangled()) {
+                        app.game.OnDragCleared(app.AnyPinned(), GetTime());
+                    }
+                }
+                else if (app.physics->Dragging()) {
                     if (IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
                         app.physics->Drag(gridMouse);
                     }
@@ -3216,7 +3739,13 @@ namespace
                         app.pickPressedOnCanvas = false;
                         app.physics->EndDrag();
                         app.physics->RefreshTangle();
-                        if (isClick && clickedFaceBead >= 0) {
+                        if (inGame && app.game.InTangle() && !app.physics->Tangled()) {
+                            if (app.physics->AutoTightening()) {
+                                app.physics->StopAutoTighten();
+                            }
+                            app.game.OnDragCleared(app.AnyPinned(), GetTime());
+                        }
+                        if (isClick && clickedFaceBead >= 0 && !inGame) {
                             FaceBead& fb = app.necklace->faceBeads[static_cast<size_t>(
                                 clickedFaceBead)];
                             if (app.debug) {
@@ -3239,7 +3768,7 @@ namespace
                     const bool isClick = dx * dx + dy * dy < 64.0f;
                     app.pickPressedOnCanvas = false;
                     app.pickClickBody = -1;
-                    if (isClick && !app.dropdownOpen && !tuningBlocks) {
+                    if (isClick && !inGame && !uiHoldsClick && !app.dropdownOpen && !tuningBlocks) {
                         app.TryStartReidemeisterAt(gridMouse);
                     }
                 }
@@ -3249,19 +3778,39 @@ namespace
                     app.physics->ResetDebugTimings();
                 }
                 const auto physicsT0 = std::chrono::high_resolution_clock::now();
+                const auto noteGameRewrite = [&](bool ok) {
+                    if (!app.game.MovePending()) {
+                        return;
+                    }
+                    if (!ok) {
+                        app.game.OnMoveAborted();
+                        app.UndoR3();
+                    }
+                    else {
+                        app.game.OnRewriteFinished(GetTime());
+                    }
+                };
                 if (app.physics->MoveActive()) {
                     app.physics->MoveStep();
                     if (app.physics->R0Complete()) {
-                        app.CompleteR0Move();
+                        const App::MoveFinish fin = app.CompleteR0Move();
+                        if (fin == App::MoveFinish::Cleared) {
+                            if (app.game.Active()) {
+                                app.game.OnBoardCleared(GetTime());
+                            }
+                        }
+                        else {
+                            noteGameRewrite(fin == App::MoveFinish::Done);
+                        }
                     }
                     else if (app.physics->R1Complete()) {
-                        app.CompleteR1Move();
+                        noteGameRewrite(app.CompleteR1Move());
                     }
                     else if (app.physics->R2Complete()) {
-                        app.CompleteR2Move();
+                        noteGameRewrite(app.CompleteR2Move());
                     }
                     else if (app.physics->R3Complete()) {
-                        app.CompleteR3Move();
+                        noteGameRewrite(app.CompleteR3Move());
                     }
                 }
                 else if (app.physics->AutoTightening()) {
@@ -3272,11 +3821,19 @@ namespace
                 }
                 const bool autoNow = app.physics && app.physics->AutoTightening();
                 const bool r3Now = app.physics && app.physics->MoveActive();
-                if ((app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now)) {
+                const bool wentIdle =
+                    (app.wasAutoTightening && !autoNow) || (app.wasR3Active && !r3Now);
+                const bool settleNow =
+                    wentIdle || (app.game.NeedsSettle() && !autoNow && !r3Now);
+                if (settleNow) {
                     const bool searchRotation = app.wasAutoTightening && !autoNow;
                     BeginViewFit(app, canvas, searchRotation);
                     if (app.physics) {
                         app.physics->RefreshTangle();
+                    }
+                    if (app.game.Active() && !app.game.Over()) {
+                        const bool tangled = app.physics && app.physics->Tangled();
+                        app.game.OnSettled(tangled, app.AnyPinned(), GetTime());
                     }
                 }
                 app.wasAutoTightening = autoNow;
@@ -3292,7 +3849,7 @@ namespace
                 DrawLayout(app, view, canvas);
             }
 
-            if (app.debug && app.physics && app.necklace) {
+            if (!inGame && app.debug && app.physics && app.necklace) {
                 const float fontSize = 15.0f;
                 const float lineH = 18.0f;
                 const float panelPad = 10.0f;
@@ -3342,7 +3899,7 @@ namespace
                 }
             }
         }
-        else {
+        else if (!app.game.Over()) {
             const std::string hint = app.loop
                 ? "Choose the infinite face from the dropdown above."
                 : "Draw a multiloop, generate one, or enter a vertex permutation and press Enter.";
@@ -3352,7 +3909,7 @@ namespace
         }
 
         // ---- Dropdown list overlay (drawn last, on top of the canvas) ----
-        if (app.dropdownOpen && !app.faceLabels.empty()) {
+        if (!inGame && app.dropdownOpen && !app.faceLabels.empty()) {
             const float itemHeight = 26.0f;
             const int count = static_cast<int>(app.faceLabels.size());
             const int visible = std::min(count, 14);
@@ -3417,7 +3974,193 @@ namespace
             DrawTextS(app.drawWarning, bx + 8.0f, by + 6.0f, fontSize, Color{255, 225, 225, 255});
         }
 
-        if (app.debug) {
+        if (!inGame && app.game.AllowanceMenuOpen()) {
+            const float itemHeight = 26.0f;
+            const Rectangle list = {allowanceBox.x, allowanceBox.y + allowanceBox.height,
+                                    allowanceBox.width,
+                                    UnpinningGame::kAllowanceCount * itemHeight};
+            DrawRectangleRec(list, WHITE);
+            DrawRectangleLinesEx(list, 2.0f, kAccent);
+            for (int i = 0; i < UnpinningGame::kAllowanceCount; ++i) {
+                const Rectangle item = {list.x, list.y + i * itemHeight, list.width, itemHeight};
+                const bool hover = CheckCollisionPointRec(mouse, item);
+                const bool selected = i == app.game.AllowanceIndex();
+                if (selected) {
+                    DrawRectangleRec(item, kAccent);
+                }
+                else if (hover) {
+                    DrawRectangleRec(item, kHover);
+                }
+                const std::string label = UnpinningGame::AllowanceLabel(i);
+                DrawTextS(label, item.x + 10.0f, item.y + 4.0f, 16.0f,
+                          selected ? WHITE : kTextDark);
+                if (hover && click) {
+                    app.game.SetAllowanceIndex(i);
+                    app.game.CloseAllowanceMenu();
+                }
+            }
+            if (click && !CheckCollisionPointRec(mouse, list) &&
+                !CheckCollisionPointRec(mouse, allowanceBox)) {
+                app.game.CloseAllowanceMenu();
+            }
+        }
+
+        if (app.game.RulesOpen()) {
+            DrawRectangle(0, 0, screenWidth, screenHeight, Color{40, 42, 48, 90});
+            const float boxW = 760.0f;
+            const float inset = 32.0f;
+            const float titleSize = 32.0f;
+            const float bodySize = 20.0f;
+            const float lineH = 28.0f;
+            const float textW = boxW - 2.0f * inset;
+            const char* paragraphs[] = {
+                "The Unpinning Game is a 2-player game played on a loop in the plane which intersects itself, with pins in numerically-labeled complementary regions.",
+                "Your turn consists of two phases:",
+                "1) Click on the numerically-labeled regions without pins, attempting to decrease the number of intersections. You are awarded one point for each intersection that you remove. You can perform moves only on regions with one, two, or three adjacent intersections.",
+                "2) Remove a pin, if there is at least one remaining.",
+                "The winner is the player with more points at the end.",
+            };
+            std::vector<std::string> bodyLines;
+            for (const char* paragraph : paragraphs) {
+                if (!bodyLines.empty()) {
+                    bodyLines.push_back("");
+                }
+                const std::vector<std::string> wrapped =
+                    WrapText(gFont, paragraph, bodySize, textW);
+                bodyLines.insert(bodyLines.end(), wrapped.begin(), wrapped.end());
+            }
+            const float btnH = 36.0f;
+            const float boxH = inset + titleSize + 18.0f +
+                               static_cast<float>(bodyLines.size()) * lineH + 22.0f + btnH + inset;
+            const Rectangle box = {(static_cast<float>(screenWidth) - boxW) * 0.5f,
+                                   (static_cast<float>(screenHeight) - boxH) * 0.5f, boxW, boxH};
+            DrawRectangleRounded(box, 0.04f, 8, Color{252, 252, 255, 255});
+            DrawRectangleRoundedLinesEx(box, 0.04f, 8, 2.0f, kAccent);
+            const std::string rulesTitle = "The Unpinning Game";
+            const float rulesTitleW = TextWidthFont(gFontBold, rulesTitle, titleSize);
+            float y = box.y + inset;
+            DrawTextFont(gFontBold, rulesTitle, box.x + (boxW - rulesTitleW) * 0.5f, y, titleSize,
+                         kTextDark);
+            y += titleSize + 18.0f;
+            for (const std::string& line : bodyLines) {
+                if (!line.empty()) {
+                    DrawTextS(line, box.x + inset, y, bodySize, kTextDark);
+                }
+                y += lineH;
+            }
+            y += 8.0f;
+            const std::string backLabel = "Back";
+            const float backW = TextWidth(backLabel, 18.0f) + 36.0f;
+            const Rectangle backR = {box.x + (boxW - backW) * 0.5f, y, backW, btnH};
+            const bool backHover = CheckCollisionPointRec(mouse, backR);
+            DrawRectangleRounded(backR, 0.35f, 6,
+                                 backHover ? ColorBrightness(kAccent, -0.15f) : kAccent);
+            const float backTextW = TextWidth(backLabel, 18.0f);
+            DrawTextS(backLabel, backR.x + (backR.width - backTextW) * 0.5f, backR.y + 8.0f, 18.0f,
+                      WHITE);
+            if (click && backHover) {
+                app.game.CloseRules();
+            }
+        }
+
+        if (app.game.ExitPrompt()) {
+            DrawRectangle(0, 0, screenWidth, screenHeight, Color{40, 42, 48, 90});
+            const float boxW = 420.0f;
+            const float boxH = 156.0f;
+            const Rectangle box = {(static_cast<float>(screenWidth) - boxW) * 0.5f,
+                                   (static_cast<float>(screenHeight) - boxH) * 0.5f, boxW, boxH};
+            DrawRectangleRounded(box, 0.08f, 8, Color{252, 252, 255, 255});
+            DrawRectangleRoundedLinesEx(box, 0.08f, 8, 2.0f, kAccent);
+            const std::string prompt = "Exit to sandbox?";
+            const float promptSize = 28.0f;
+            const float promptW = TextWidthFont(gFontBold, prompt, promptSize);
+            DrawTextFont(gFontBold, prompt, box.x + (boxW - promptW) * 0.5f, box.y + 32.0f,
+                         promptSize, kTextDark);
+            const float btnW = 110.0f;
+            const float btnH = 34.0f;
+            const Rectangle yesR = {box.x + 64.0f, box.y + 92.0f, btnW, btnH};
+            const Rectangle noR = {box.x + boxW - 64.0f - btnW, box.y + 92.0f, btnW, btnH};
+            const auto promptButton = [&](Rectangle r, const std::string& label, Color base) {
+                const bool hover = CheckCollisionPointRec(mouse, r);
+                DrawRectangleRounded(r, 0.35f, 6, hover ? ColorBrightness(base, -0.15f) : base);
+                const float tw = TextWidth(label, 18.0f);
+                DrawTextS(label, r.x + (r.width - tw) * 0.5f, r.y + 7.0f, 18.0f, WHITE);
+                return click && hover;
+            };
+            if (promptButton(yesR, "Yes", kAccent)) {
+                app.ConfirmExitToSandbox();
+            }
+            if (promptButton(noR, "No", kErrorRed)) {
+                app.game.DismissExit();
+            }
+        }
+
+        if (app.game.Over()) {
+            DrawRectangle(0, 0, screenWidth, screenHeight, kBackground);
+            const auto pointsWord = [](int n) {
+                return std::to_string(n) + (n == 1 ? std::string(" point") : std::string(" points"));
+            };
+            const float titleSize = 42.0f;
+            const std::string title = "Game over!";
+            float y = static_cast<float>(screenHeight) * 0.5f - 130.0f;
+            const float titleW = TextWidthFont(gFontBold, title, titleSize);
+            DrawTextFont(gFontBold, title,
+                         (static_cast<float>(screenWidth) - titleW) * 0.5f, y, titleSize, kTextDark);
+            y += 68.0f;
+            const float lineSize = 26.0f;
+            const std::string line1 = "Player 1: " + pointsWord(app.game.Score(1));
+            const std::string line2 = "Player 2: " + pointsWord(app.game.Score(2));
+            const float line1W = TextWidthFont(gFontBold, line1, lineSize);
+            const float line2W = TextWidthFont(gFontBold, line2, lineSize);
+            DrawTextFont(gFontBold, line1, (static_cast<float>(screenWidth) - line1W) * 0.5f, y,
+                         lineSize, kTextDark);
+            y += 36.0f;
+            DrawTextFont(gFontBold, line2, (static_cast<float>(screenWidth) - line2W) * 0.5f, y,
+                         lineSize, kTextDark);
+            y += 40.0f;
+            const std::string outcome = app.game.Outcome();
+            const float outcomeW = TextWidthFont(gFontBold, outcome, lineSize);
+            DrawTextFont(gFontBold, outcome, (static_cast<float>(screenWidth) - outcomeW) * 0.5f, y,
+                         lineSize, kTextDark);
+            y += 56.0f;
+            const float btnFont = 18.0f;
+            const std::string again = "Play again (same loop)";
+            const std::string fresh = "Play again (new loop)";
+            const std::string back = "Sandbox";
+            const float againW = TextWidthFont(gFontBold, again, btnFont) + 28.0f;
+            const float freshW = TextWidthFont(gFontBold, fresh, btnFont) + 28.0f;
+            const float backW = TextWidthFont(gFontBold, back, btnFont) + 28.0f;
+            const float gap = 16.0f;
+            float bx = (static_cast<float>(screenWidth) - againW - freshW - backW - 2.0f * gap) * 0.5f;
+            const Rectangle againR = {bx, y, againW, 36.0f};
+            const Rectangle freshR = {bx + againW + gap, y, freshW, 36.0f};
+            const Rectangle backR = {freshR.x + freshW + gap, y, backW, 36.0f};
+            const Color playBase = {46, 158, 78, 255};
+            const auto endButton = [&](Rectangle r, const std::string& label, Color base, bool bold) {
+                const bool hover = CheckCollisionPointRec(mouse, r);
+                DrawRectangleRounded(r, 0.35f, 6, hover ? ColorBrightness(base, -0.15f) : base);
+                const float tw = bold ? TextWidthFont(gFontBold, label, btnFont) : TextWidth(label, btnFont);
+                const float tx = r.x + (r.width - tw) * 0.5f;
+                if (bold) {
+                    DrawTextFont(gFontBold, label, tx, r.y + 8.0f, btnFont, WHITE);
+                }
+                else {
+                    DrawTextS(label, tx, r.y + 8.0f, btnFont, WHITE);
+                }
+                return click && hover;
+            };
+            if (endButton(againR, again, playBase, true)) {
+                app.ReplayUnpinningMatch();
+            }
+            if (endButton(freshR, fresh, playBase, true)) {
+                app.StartRandomOddMatch();
+            }
+            if (endButton(backR, back, kAccent, true)) {
+                app.BackToSandboxFromGame();
+            }
+        }
+
+        if (!inGame && app.debug) {
             FramePhysicsTuning(app.tuningUI, app.physicsParams, gFont, mouse, click,
                                screenWidth, screenHeight);
         }
@@ -3429,7 +4172,7 @@ namespace
 void RunApp()
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-    InitWindow(1460, 850, "Pin the Loop");
+    InitWindow(1460, 850, "The Unpinning Game");
     SetExitKey(KEY_NULL); // ESC is used to unfocus the textbox
     SetTargetFPS(60);
     LoadUiFont();

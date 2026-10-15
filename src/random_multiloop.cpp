@@ -1,10 +1,12 @@
 #include "random_multiloop.h"
 
+#include "move_rewrite.h"
 #include "multiloop.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -190,6 +192,133 @@ namespace
             sigma = Permutation::FromCycles(cycles);
         }
     }
+
+    int RemapExteriorHalfEdge(const Multiloop& loop, const RewriteResult& rw, int halfEdge)
+    {
+        const int direct = rw.MapHalfEdge(halfEdge);
+        if (direct != 0) {
+            return direct;
+        }
+        for (const std::vector<int>& face : loop.faces) {
+            bool onFace = false;
+            for (const int h : face) {
+                if (h == halfEdge) {
+                    onFace = true;
+                    break;
+                }
+            }
+            if (!onFace) {
+                continue;
+            }
+            for (const int h : face) {
+                const int mapped = rw.MapHalfEdge(h);
+                if (mapped != 0) {
+                    return mapped;
+                }
+            }
+        }
+        return 0;
+    }
+
+    bool HalfEdgeOnFace(const Multiloop& loop, int halfEdge)
+    {
+        for (const std::vector<int>& face : loop.faces) {
+            for (const int h : face) {
+                if (h == halfEdge) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // One adjacent smoothing of cycle (a, b, c, d). rotation 0 pairs (a, b)
+    // with (c, d); rotation 1 pairs (b, c) with (d, a). A pair whose two
+    // labels are the ends of one edge is deleted, and the other pair is
+    // spliced, matching an R1.
+    bool TryAdjacentSmoothing(const Multiloop& loop, int crossing, int rotation, RewriteResult* out)
+    {
+        const std::vector<std::vector<int>> cycles = loop.sigma.Cycles();
+        if (crossing < 0 || crossing >= static_cast<int>(cycles.size()) ||
+            cycles[static_cast<size_t>(crossing)].size() != 4) {
+            return false;
+        }
+        const std::vector<int>& cycle = cycles[static_cast<size_t>(crossing)];
+        const int h0 = cycle[static_cast<size_t>(rotation % 4)];
+        const int h1 = cycle[static_cast<size_t>((rotation + 1) % 4)];
+        const int h2 = cycle[static_cast<size_t>((rotation + 2) % 4)];
+        const int h3 = cycle[static_cast<size_t>((rotation + 3) % 4)];
+        const int pairs[2][2] = {{h0, h1}, {h2, h3}};
+        std::vector<int> deletedEdges;
+        std::vector<SplicePair> splices;
+        for (int p = 0; p < 2; ++p) {
+            const int u = pairs[p][0];
+            const int v = pairs[p][1];
+            if (std::abs(u) == std::abs(v)) {
+                deletedEdges.push_back(std::abs(u));
+            }
+            else {
+                splices.push_back(SplicePair{u, v});
+            }
+        }
+        RewriteResult rw;
+        if (!DeleteCrossingsAndSplice(loop, {crossing}, deletedEdges, splices, &rw)) {
+            return false;
+        }
+        if (!rw.circleArcs.empty() || !ValidateMultiloopSigma(rw.sigma).empty()) {
+            return false;
+        }
+        try {
+            const Multiloop next(rw.sigma);
+            const int crossings = static_cast<int>(next.sigma.Cycles().size());
+            if (next.numStrands != 1 || crossings != static_cast<int>(cycles.size()) - 1 ||
+                crossings <= 0) {
+                return false;
+            }
+        }
+        catch (const std::exception&) {
+            return false;
+        }
+        *out = std::move(rw);
+        return true;
+    }
+
+    // Deletes one uniformly chosen crossing by the adjacent smoothing that
+    // keeps a single strand. Returns false when that smoothing is not unique
+    // or the exterior face cannot be followed.
+    bool ResolveOneCrossing(RandomMultiloop* sample, std::mt19937& rng)
+    {
+        const Multiloop loop(sample->sigma);
+        const std::vector<std::vector<int>> cycles = loop.sigma.Cycles();
+        if (cycles.empty()) {
+            return false;
+        }
+        const int crossing = static_cast<int>(rng() % cycles.size());
+        RewriteResult kept;
+        int winners = 0;
+        for (int rotation = 0; rotation < 2; ++rotation) {
+            RewriteResult rw;
+            if (!TryAdjacentSmoothing(loop, crossing, rotation, &rw)) {
+                continue;
+            }
+            kept = std::move(rw);
+            ++winners;
+        }
+        if (winners != 1) {
+            return false;
+        }
+        const int exterior = RemapExteriorHalfEdge(loop, kept, sample->exteriorHalfEdge);
+        if (exterior == 0) {
+            return false;
+        }
+        const Multiloop next(kept.sigma);
+        if (!HalfEdgeOnFace(next, exterior)) {
+            return false;
+        }
+        sample->sigma = kept.sigma;
+        sample->exteriorHalfEdge = exterior;
+        return true;
+    }
 }
 
 RandomMultiloop GenerateRandomMultiloop(int minFaces, double density, bool forceOneStrand,
@@ -334,4 +463,40 @@ RandomMultiloop GenerateRandomMultiloop(int minFaces, double density, bool force
         return result;
     }
     throw std::runtime_error("Random multiloop generation failed (degenerate point cloud)");
+}
+
+RandomMultiloop MakeOddOneStrandMultiloop(unsigned seed)
+{
+    std::mt19937 rng(seed);
+    // Same request as the sandbox default: 10 points, mesh density 0.8.
+    constexpr int kPoints = 10;
+    constexpr double kDensity = 0.8;
+    constexpr int kAttempts = 48;
+    for (int attempt = 0; attempt < kAttempts; ++attempt) {
+        RandomMultiloop sample;
+        try {
+            sample = GenerateRandomMultiloop(kPoints, kDensity, true, false, rng());
+        }
+        catch (const std::exception&) {
+            continue;
+        }
+        {
+            const Multiloop loop(sample.sigma);
+            const int crossings = static_cast<int>(loop.sigma.Cycles().size());
+            if (loop.numStrands != 1 || crossings <= 0) {
+                continue;
+            }
+            if (crossings % 2 == 0 && !ResolveOneCrossing(&sample, rng)) {
+                continue;
+            }
+        }
+        const Multiloop played(sample.sigma);
+        const int crossings = static_cast<int>(played.sigma.Cycles().size());
+        if (played.numStrands != 1 || crossings <= 0 || crossings % 2 == 0 ||
+            !HalfEdgeOnFace(played, sample.exteriorHalfEdge)) {
+            continue;
+        }
+        return sample;
+    }
+    throw std::runtime_error("Random multiloop generation failed (no odd one-strand diagram)");
 }

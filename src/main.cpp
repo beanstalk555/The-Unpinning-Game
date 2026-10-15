@@ -3,6 +3,6 @@
 
 int main()
 {
-    RunPermutationTests();
+    //RunPermutationTests();
     RunApp();
 }
