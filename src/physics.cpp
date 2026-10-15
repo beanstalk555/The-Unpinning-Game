@@ -3454,9 +3454,10 @@ void Physics::TryFaceMerge()
     if (dist > 0.25f * diameter_ && mergeFrames_ < kMergeFrameCap) {
         return;
     }
-    neck_->faceBeads[static_cast<size_t>(keepIdx)].highlighted =
-        neck_->faceBeads[static_cast<size_t>(keepIdx)].highlighted ||
-        neck_->faceBeads[static_cast<size_t>(dropIdx)].highlighted;
+    FaceBead& keepBead = neck_->faceBeads[static_cast<size_t>(keepIdx)];
+    FaceBead& dropBead = neck_->faceBeads[static_cast<size_t>(dropIdx)];
+    keepBead.highlighted = keepBead.highlighted || dropBead.highlighted;
+    keepBead.pinned = keepBead.pinned || dropBead.pinned;
     neck_->faceBeads.erase(neck_->faceBeads.begin() + dropIdx);
     if (static_cast<size_t>(dropIdx) < fvel_.size()) {
         fvel_.erase(fvel_.begin() + dropIdx);
