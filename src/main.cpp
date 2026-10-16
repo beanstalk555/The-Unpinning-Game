@@ -3,6 +3,8 @@
 
 int main()
 {
-    //RunPermutationTests();
+#ifdef RUN_PERMUTATION_TESTS
+    RunPermutationTests();
+#endif
     RunApp();
 }

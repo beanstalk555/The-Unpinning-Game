@@ -92,6 +92,8 @@ private:
     void Append(const std::string& line);
     void Flush() const;
     void OpenLog();
+    // Moves the current log into tangled_games, completed_games, or other_games.
+    void PlaceLog(const char* folder);
     std::string MoveLine(bool includePoints) const;
     static const char* MoveName(MoveKind kind);
     static int PointsFor(MoveKind kind);
@@ -121,4 +123,5 @@ private:
 
     std::string log_;
     std::string logPath_;
+    bool sawTangle_ = false;
 };

@@ -197,7 +197,7 @@ endif
 CFLAGS += -Wall -std=c++14 -D_DEFAULT_SOURCE -Wno-missing-braces
 
 ifeq ($(BUILD_MODE),DEBUG)
-    CFLAGS += -g -O0
+    CFLAGS += -g -O0 -DRUN_PERMUTATION_TESTS -DDEBUG_UI
 else
     CFLAGS += -s -O1
 endif
@@ -206,9 +206,9 @@ endif
 #CFLAGS += -Wextra -Wmissing-prototypes -Wstrict-prototypes
 ifeq ($(PLATFORM),PLATFORM_DESKTOP)
     ifeq ($(PLATFORM_OS),WINDOWS)
-        # resource file contains windows executable icon and properties
-        # -Wl,--subsystem,windows hides the console window
-        CFLAGS += $(RAYLIB_PATH)/src/raylib.rc.data
+        # icon/game.rc names the icon GLFW_ICON, which is both the executable
+        # icon and the window title-bar icon.
+        GAME_RC = icon/game.o
     endif
     ifeq ($(PLATFORM_OS),LINUX)
         ifeq ($(RAYLIB_LIBTYPE),STATIC)
@@ -310,6 +310,10 @@ ifeq ($(PLATFORM),PLATFORM_DESKTOP)
         # Libraries for Windows desktop compilation
         # NOTE: WinMM library required to set high-res timer resolution
         LDLIBS = -lraylib -lopengl32 -lgdi32 -lwinmm
+        # Release is a windowed program. Non-release keeps the console.
+        ifneq ($(BUILD_MODE),DEBUG)
+            LDLIBS += -mwindows
+        endif
         # Required for physac examples
         #LDLIBS += -static -lpthread
     endif
@@ -387,8 +391,11 @@ all:
 	$(MAKE) $(MAKEFILE_PARAMS)
 
 # Project target defined by PROJECT_NAME
-$(PROJECT_NAME): $(OBJS)
-	$(CC) -o $(PROJECT_NAME)$(EXT) $(OBJS) $(CFLAGS) $(INCLUDE_PATHS) $(LDFLAGS) $(LDLIBS) -D$(PLATFORM)
+$(PROJECT_NAME): $(OBJS) $(GAME_RC)
+	$(CC) -o $(PROJECT_NAME)$(EXT) $(OBJS) $(GAME_RC) $(CFLAGS) $(INCLUDE_PATHS) $(LDFLAGS) $(LDLIBS) -D$(PLATFORM)
+
+icon/game.o: icon/game.rc icon/icon.ico
+	windres icon/game.rc -O coff -o icon/game.o
 
 # Compile source files
 # NOTE: This pattern will compile every module defined on $(OBJS)
@@ -398,5 +405,5 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 
 # Delete files created by building this program.
 clean:
-	rm -f $(PROJECT_NAME)$(EXT) $(PROJECT_NAME).exe $(PROJECT_NAME).js $(PROJECT_NAME).wasm
+	rm -f $(PROJECT_NAME)$(EXT) $(PROJECT_NAME).exe $(PROJECT_NAME).js $(PROJECT_NAME).wasm icon/game.o
 

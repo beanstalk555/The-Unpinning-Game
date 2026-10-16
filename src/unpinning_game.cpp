@@ -1,5 +1,6 @@
 #include "unpinning_game.h"
 
+#include <cstdio>
 #include <ctime>
 #include <fstream>
 
@@ -12,14 +13,25 @@
 namespace
 {
     const char* kInfinityUtf8 = "\xE2\x88\x9E";
+    const char* kTangledLogs = "unpinning_logs/tangled_games";
+    const char* kCompletedLogs = "unpinning_logs/completed_games";
+    const char* kOtherLogs = "unpinning_logs/other_games";
+
+    void EnsureDir(const char* path)
+    {
+#ifdef _WIN32
+        _mkdir(path);
+#else
+        mkdir(path, 0755);
+#endif
+    }
 
     void EnsureLogDirectory()
     {
-#ifdef _WIN32
-        _mkdir("unpinning_logs");
-#else
-        mkdir("unpinning_logs", 0755);
-#endif
+        EnsureDir("unpinning_logs");
+        EnsureDir(kTangledLogs);
+        EnsureDir(kCompletedLogs);
+        EnsureDir(kOtherLogs);
     }
 
     bool FileExists(const std::string& path)
@@ -156,14 +168,49 @@ void UnpinningGame::OpenLog()
     const std::tm local = *std::localtime(&now);
     char stamp[32];
     std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
-    std::string path = std::string("unpinning_logs/game-") + stamp + ".txt";
+    std::string path = std::string(kOtherLogs) + "/game-" + stamp + ".txt";
     int suffix = 2;
     while (FileExists(path)) {
-        path = std::string("unpinning_logs/game-") + stamp + "-" + std::to_string(suffix) + ".txt";
+        path = std::string(kOtherLogs) + "/game-" + stamp + "-" + std::to_string(suffix) + ".txt";
         ++suffix;
     }
     logPath_ = path;
     log_.clear();
+    sawTangle_ = false;
+}
+
+void UnpinningGame::PlaceLog(const char* folder)
+{
+    if (logPath_.empty() || folder == nullptr) {
+        return;
+    }
+    const std::string prefix = std::string(folder) + "/";
+    if (logPath_.size() >= prefix.size() && logPath_.compare(0, prefix.size(), prefix) == 0) {
+        return;
+    }
+    EnsureDir("unpinning_logs");
+    EnsureDir(folder);
+    const std::size_t slash = logPath_.find_last_of('/');
+    const std::string name = (slash == std::string::npos) ? logPath_ : logPath_.substr(slash + 1);
+    const std::size_t dot = name.rfind('.');
+    const std::string stem = (dot == std::string::npos) ? name : name.substr(0, dot);
+    const std::string ext = (dot == std::string::npos) ? std::string() : name.substr(dot);
+    std::string dest = prefix + name;
+    int suffix = 2;
+    while (FileExists(dest)) {
+        dest = prefix + stem + "-" + std::to_string(suffix) + ext;
+        ++suffix;
+    }
+    if (std::rename(logPath_.c_str(), dest.c_str()) != 0) {
+        std::ofstream out(dest.c_str(), std::ios::binary | std::ios::trunc);
+        if (!out) {
+            return;
+        }
+        out << log_;
+        out.close();
+        std::remove(logPath_.c_str());
+    }
+    logPath_ = dest;
 }
 
 void UnpinningGame::Begin(const std::string& sigma, const std::string& infiniteRegion,
@@ -308,6 +355,9 @@ void UnpinningGame::OnBoardCleared(double now)
     Append("Game over.");
     Append(ScoreLine());
     Append(Outcome());
+    if (!sawTangle_) {
+        PlaceLog(kCompletedLogs);
+    }
 }
 
 void UnpinningGame::OnSettled(bool tangled, bool anyPins, double now)
@@ -333,8 +383,10 @@ void UnpinningGame::OnSettled(bool tangled, bool anyPins, double now)
         return;
     }
     if (tangled) {
+        sawTangle_ = true;
         Append(MoveLine(false) + " tangled.");
         Append("Tangle detected.");
+        PlaceLog(kTangledLogs);
         live = Phase::Tangle;
         return;
     }
@@ -418,6 +470,9 @@ void UnpinningGame::MarkEarlyExit()
     }
     Append("");
     Append("Early exit to sandbox.");
+    if (!sawTangle_) {
+        PlaceLog(kOtherLogs);
+    }
     Deactivate();
 }
 

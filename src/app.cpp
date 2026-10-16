@@ -3333,6 +3333,7 @@ namespace
             rx += TextWidth(strandText, 18.0f) + 16.0f;
         }
         rx += checkbox(rx, row2, "show beads", &app.showBeads, !drawing) + 16.0f;
+#ifdef DEBUG_UI
         rx += checkbox(rx, row2, "debug", &app.debug, !drawing) + 16.0f;
         if (app.debug) {
             rx += checkbox(rx, row2, "timers", &app.showDebugTiming, !drawing) + 16.0f;
@@ -3340,6 +3341,7 @@ namespace
             rx += checkbox(rx, row2, "global collisions", &app.showGlobalCollisions, !drawing) +
                   16.0f;
         }
+#endif
         if (!app.error.empty()) {
             DrawTextS(app.error, rx, row2 + 6.0f, 18.0f, kErrorRed);
         }
