@@ -1,10 +1,10 @@
 # The Unpinning Game
 
-A raylib prototype for the unpinning game.
+A desktop implementation of the unpinning game.
 
 ## Rules
 
-The Unpinning Game is a 2-player game played on a loop in the plane which intersects itself, with pins in numerically-labeled complementary regions.
+The unpinning game is a 2-player game played on a loop in the plane which intersects itself, with pins in numerically-labeled complementary regions.
 
 Your turn consists of two phases:
 
@@ -14,7 +14,9 @@ Your turn consists of two phases:
 
 The winner is the player with more points at the end.
 
-### Technical note
+### Technical notes
+
+This version of the unpinning game is a dynamic variant of the "static" variant presented [here](https://www.youtube.com/watch?v=X9h2pMM0wrM) and [here](https://christopherlloyd.github.io/LooPindex/unpinning_game/poster.svg). 
 
 The moves that players can perform on their turn are the intersection-nonincreasing Reidemeister moves (shortening R1, shortening R2, R3) which may be familiar to knot-theorists (though we don't care about over-under crossing information).
 
