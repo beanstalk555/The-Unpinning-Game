@@ -2,9 +2,9 @@
 
 A desktop implementation of the unpinning game.
 
-## Credits
+## Credits and acknowledgements
 
-This project grew out of a collaboration between Araf Israk, Christopher-Lloyd Simon, and Ben Stucky - all have contributed ideas to this work. We thank Lucas Burson for his help as well.
+This project grew out of a collaboration between Araf Israk, Christopher-Lloyd Simon, and Ben Stucky; all have contributed ideas to this work. In particular the implementation of the dynamic Reidemeister moves shares ideas from an earlier implementation of a "loop sandbox" coded by Araf in Summer 2026. We thank Lucas Burson for his help as well.
 
 ## Rules
 
