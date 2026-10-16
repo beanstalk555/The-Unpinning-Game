@@ -106,11 +106,15 @@ namespace
             "C:/Windows/Fonts/segoeui.ttf", // Segoe UI: friendly, modern, sans-serif
             "C:/Windows/Fonts/calibri.ttf",
             "C:/Windows/Fonts/arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf", // macOS
+            "/Library/Fonts/Arial.ttf",
         };
         const char* boldCandidates[] = {
             "C:/Windows/Fonts/segoeuib.ttf",
             "C:/Windows/Fonts/calibrib.ttf",
             "C:/Windows/Fonts/arialbd.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf", // macOS
+            "/Library/Fonts/Arial Bold.ttf",
         };
         int codepoints[128];
         int codepointCount = 0;
@@ -4173,7 +4177,12 @@ namespace
 
 void RunApp()
 {
+#ifdef __APPLE__
+    // Render at native Retina resolution instead of upscaling a 1x framebuffer.
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
+#else
     SetConfigFlags(FLAG_WINDOW_RESIZABLE);
+#endif
     InitWindow(1460, 850, "The Unpinning Game");
     SetExitKey(KEY_NULL); // ESC is used to unfocus the textbox
     SetTargetFPS(60);
