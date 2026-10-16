@@ -1,0 +1,98 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+env:
+  RAYLIB_VERSION: '6.0'
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build raylib (universal)
+        run: |
+          git clone --depth 1 --branch "$RAYLIB_VERSION" https://github.com/raysan5/raylib.git
+          make -C raylib/src PLATFORM=PLATFORM_DESKTOP CUSTOM_CFLAGS="-arch arm64 -arch x86_64" -j"$(sysctl -n hw.ncpu)"
+
+      - name: Build game
+        run: |
+          CFLAGS="-arch arm64 -arch x86_64" make MAKE=make RAYLIB_PATH="$PWD/raylib"
+          lipo -info game
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          zip -j dist/The-Unpinning-Game-macos-universal.zip game README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: The-Unpinning-Game-macos
+          path: dist/*.zip
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            git
+            make
+            zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: Build raylib
+        run: |
+          git clone --depth 1 --branch "$RAYLIB_VERSION" https://github.com/raysan5/raylib.git
+          cmake -S raylib -B raylib/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_EXAMPLES=OFF
+          cmake --build raylib/build
+          cp raylib/build/raylib/libraylib.a raylib/src/
+
+      - name: Build game
+        # -static bundles libstdc++/libgcc/winpthread so the exe has no MinGW DLL dependencies
+        run: |
+          CFLAGS="-static" make MAKE=make RAYLIB_PATH=raylib
+          ls -l game.exe
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          zip -j dist/The-Unpinning-Game-windows-x64.zip game.exe README.md
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: The-Unpinning-Game-windows
+          path: dist/*.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.zip
+          generate_release_notes: true
