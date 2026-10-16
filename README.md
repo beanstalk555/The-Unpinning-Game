@@ -2,6 +2,10 @@
 
 A desktop implementation of the unpinning game.
 
+## Credits
+
+This project grew out of a collaboration between Araf Israk, Christopher-Lloyd Simon, and Ben Stucky - all have contributed ideas to this work. We thank Lucas Burson for his help as well.
+
 ## Rules
 
 The unpinning game is a 2-player game played on a loop in the plane which intersects itself, with pins in numerically-labeled complementary regions.
