@@ -38,9 +38,15 @@ The implementation features:
 
 It also features a sandbox with random multiloop generation and drawing, with dedicated options for one-strand and simple cases. Pins can be added and removed freely, the multiloop can be dragged with left click, and regions can be highlighted with right click. From here the game can be played with "unconventional" settings including on multiloops with more than one strand, or with pins in only some regoins.
 
-# Installation
+# Installation instructions
+
+The easiest way to install the game is to use the pre-built binaries. The [latest release](https://github.com/beanstalk555/The-Unpinning-Game/releases/tag/v0.0.1) contains binaries for Windows and macOS under Assets (bottom of the page).
+
+# Building from source
 
 ## Windows
+
+The instructions below should be fairly straightforward to adapt for any platform, but I have not tested on other platforms.
 
 ### Requirements
 
