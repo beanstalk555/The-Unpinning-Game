@@ -20,11 +20,11 @@ The winner is the player with more points at the end.
 
 ### Technical notes
 
-This version of the unpinning game is a dynamic variant of the "static" variant presented [on YouTube](https://www.youtube.com/watch?v=X9h2pMM0wrM) and [on this poster](https://christopherlloyd.github.io/LooPindex/unpinning_game/poster.svg). 
+This version of the unpinning game is a dynamic variant of the "static" variant presented in this [YouTube lecture](https://www.youtube.com/watch?v=X9h2pMM0wrM) and [on this poster](https://christopherlloyd.github.io/LooPindex/unpinning_game/poster.svg). 
 
-The moves that players can perform on their turn are the intersection-nonincreasing Reidemeister moves (shortening R1, shortening R2, R3) which will be familiar to knot-theorists (though we don't care about over-under crossing information).
+The moves that players can perform on their turn are the intersection-non-increasing Reidemeister moves (shortening R1, shortening R2, R3) which will be familiar to knot-theorists (though we don't care about over-under crossing information).
 
-The game always ends with the loop becoming completely untangled. There is a very nice theorem of Hass and Scott that loops in surfaces in general position may be tightened using only these shortening moves. This is in stark contrast to the situation in knot theory where untangling diagramatically may require introducing many extra crossings before a minimum number of crossings is achieved.
+The game always ends with the loop becoming completely untangled. There is a very nice theorem of Hass and Scott that loops in surfaces in general position may be tightened using only these shortening moves. This is in stark contrast to the situation in knot theory where untangling diagrammatically may require introducing many extra crossings before a minimum number of crossings is achieved.
 
 ## App features
 
@@ -44,7 +44,7 @@ It also features a sandbox with random multiloop generation and drawing, with de
 
 ## Installation
 
-The easiest way to install the game is to use a pre-built binary. The [latest release](https://github.com/beanstalk555/The-Unpinning-Game/releases/tag/v0.0.1) contains binaries for Windows and macOS under Assets (bottom of the page).
+The easiest way to install the game is to use a pre-built binary. The [latest release](https://github.com/beanstalk555/The-Unpinning-Game/releases) contains binaries for Windows, macOS, and Linux under Assets (bottom of the page).
 
 ## Building from source
 
