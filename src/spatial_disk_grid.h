@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <unordered_map>
@@ -14,7 +15,7 @@ class SpatialDiskGrid
 public:
     void SetCellSize(float cellSize);
     void Clear();
-    void Reserve(size_t bodyHint);
+    void Reserve(std::size_t bodyHint);
 
     void Insert(int body, float x, float y);
 

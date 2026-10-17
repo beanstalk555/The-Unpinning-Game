@@ -14,7 +14,7 @@ void SpatialDiskGrid::Clear()
     cells_.clear();
 }
 
-void SpatialDiskGrid::Reserve(size_t bodyHint)
+void SpatialDiskGrid::Reserve(std::size_t bodyHint)
 {
     cells_.reserve(bodyHint / 4 + 1);
 }
