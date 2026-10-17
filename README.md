@@ -37,7 +37,7 @@ One feature worth noting is that if the unpinning game is played on a loop with 
 The implementation features:
 
 - A custom physics engine for tightening and settling
-- Dynamic performance of Reidemeister moves. 
+- Dynamic performance of Reidemeister moves
 - The permutation representation as the primary data structure for storing and manipulating multiloops
 
 It also features a sandbox with random multiloop generation and drawing, with dedicated options for one-strand and simple cases. Pins can be added and removed freely, the multiloop can be dragged with left click, and regions can be highlighted with right click. From here the game can be played with "unconventional" settings including on multiloops with more than one strand, or with pins in only some regions.
