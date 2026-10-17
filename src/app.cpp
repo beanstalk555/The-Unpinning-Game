@@ -108,6 +108,19 @@ namespace
             "C:/Windows/Fonts/arial.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf", // macOS
             "/Library/Fonts/Arial.ttf",
+            "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf", // Linux, if installed
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", // Debian/Ubuntu
+            "/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf", // Fedora
+            "/usr/share/fonts/TTF/LiberationSans-Regular.ttf", // Arch
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
         };
         const char* boldCandidates[] = {
             "C:/Windows/Fonts/segoeuib.ttf",
@@ -115,6 +128,19 @@ namespace
             "C:/Windows/Fonts/arialbd.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf", // macOS
             "/Library/Fonts/Arial Bold.ttf",
+            "/usr/share/fonts/truetype/msttcorefonts/Arial_Bold.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/TTF/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
         };
         int codepoints[128];
         int codepointCount = 0;
@@ -1473,6 +1499,20 @@ namespace
             }
             for (const FaceBead& fb : necklace->faceBeads) {
                 if (fb.pinned) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // An unpinned region whose click would start R0, R1, R2, or R3.
+        bool HasPlayableMove() const
+        {
+            if (!necklace) {
+                return false;
+            }
+            for (const FaceBead& fb : necklace->faceBeads) {
+                if (FaceBeadMoveHint(fb) != MoveHint::None) {
                     return true;
                 }
             }
@@ -3606,7 +3646,7 @@ namespace
 
             DrawTextFont(gFontBold, title, titleX, titleY, titleSize, titleColor);
 
-            const std::string detail = app.game.StatusDetail(app.AnyPinned());
+            const std::string detail = app.game.StatusDetail(app.AnyPinned(), app.HasPlayableMove());
             const float leftLimit = std::max(40.0f, boxX - pad - 16.0f);
             float detailSize = infoSize;
             const float detailW = TextWidthFont(gFontBold, detail, infoSize);
@@ -4020,7 +4060,7 @@ namespace
             const float lineH = 28.0f;
             const float textW = boxW - 2.0f * inset;
             const char* paragraphs[] = {
-                "The Unpinning Game is a 2-player game played on a loop in the plane which intersects itself, with pins in numerically-labeled complementary regions.",
+                "The Unpinning Game is a 2-player game played on a loop in the plane (drawn in red) which intersects itself, with pins (drawn in green) in numerically-labeled complementary regions.",
                 "Your turn consists of two phases:",
                 "1) Click on the numerically-labeled regions without pins, attempting to decrease the number of intersections. You are awarded one point for each intersection that you remove. You can perform moves only on regions with one, two, or three adjacent intersections.",
                 "2) Remove a pin, if there is at least one remaining.",
@@ -4177,12 +4217,8 @@ namespace
 
 void RunApp()
 {
-#ifdef __APPLE__
-    // Render at native Retina resolution instead of upscaling a 1x framebuffer.
+    // Render at the monitor scale and multisample curves, on macOS and Windows.
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
-#else
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE);
-#endif
     InitWindow(1460, 850, "The Unpinning Game");
     SetExitKey(KEY_NULL); // ESC is used to unfocus the textbox
     SetTargetFPS(60);

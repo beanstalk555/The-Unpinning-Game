@@ -68,8 +68,8 @@ public:
 
     std::string TurnTitle() const;
     int CurrentPlayer() const { return player_; }
-    // Move instruction, score flash, or tangle notice. `anyPins` comes from the live necklace.
-    std::string StatusDetail(bool anyPins) const;
+    // Move instruction, score flash, or tangle notice. Both flags come from the live necklace.
+    std::string StatusDetail(bool anyPins, bool movesAvailable) const;
     std::string ScoreLine() const;
     int Score(int player) const;
     std::string Outcome() const;

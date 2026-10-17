@@ -481,7 +481,7 @@ std::string UnpinningGame::TurnTitle() const
     return "Player " + std::to_string(player_) + "'s turn.";
 }
 
-std::string UnpinningGame::StatusDetail(bool anyPins) const
+std::string UnpinningGame::StatusDetail(bool anyPins, bool movesAvailable) const
 {
     if (Live() == Phase::Tangle) {
         return "Tangle detected.";
@@ -492,6 +492,9 @@ std::string UnpinningGame::StatusDetail(bool anyPins) const
     const bool noMoves = !unlimited_ && movesUsed_ >= allowance_;
     if (noMoves && anyPins) {
         return "No moves left: Remove a pin.";
+    }
+    if (anyPins && !movesAvailable) {
+        return "No moves available: Remove a pin.";
     }
     std::string sentence;
     if (unlimited_) {
