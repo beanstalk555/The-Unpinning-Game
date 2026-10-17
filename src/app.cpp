@@ -4062,7 +4062,7 @@ namespace
             const char* paragraphs[] = {
                 "The Unpinning Game is a 2-player game played on a loop in the plane (drawn in red) which intersects itself, with pins (drawn in green) in numerically-labeled complementary regions.",
                 "Your turn consists of two phases:",
-                "1) Click on the numerically-labeled regions without pins, attempting to decrease the number of intersections. You are awarded one point for each intersection that you remove. You can perform moves only on regions with one, two, or three adjacent intersections.",
+                "1) Click on the numerically-labeled regions without pins, attempting to decrease the number of self-intersections. You are awarded one point for each self-intersection that you remove. You can perform moves only on regions with zero, one, two, or three adjacent intersections (Reidemeister moves).",
                 "2) Remove a pin, if there is at least one remaining.",
                 "The winner is the player with more points at the end.",
             };
