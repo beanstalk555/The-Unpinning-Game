@@ -12,7 +12,7 @@ The unpinning game is a 2-player game played on a loop in the plane which inters
 
 Your turn consists of two phases:
 
-1. Click on the numerically-labeled regions without pins, attempting to decrease the number of intersections. You are awarded one point for each intersection that you remove. You can perform moves only on regions with one, two, or three adjacent intersections.
+1. Click on the numerically-labeled regions without pins, attempting to decrease the number of self-intersections. You are awarded one point for each self-intersection that you remove. You can perform moves only on regions with zero, one, two, or three adjacent intersections.
 
 2. Remove a pin, if there is at least one remaining.
 
@@ -30,7 +30,7 @@ The game always ends with the loop becoming completely untangled. There is a ver
 
 ### No draws
 
-One nice feature that is worth noting is that if the unpinning game is played on a loop with an odd number of crossings, it will never result in a draw.
+One feature worth noting is that if the unpinning game is played on a loop with an odd number of crossings, it will never result in a draw.
 
 ### Implementation features
 
@@ -44,7 +44,7 @@ It also features a sandbox with random multiloop generation and drawing, with de
 
 ## Installation
 
-The easiest way to install the game is to use a pre-built binary. The [latest release](https://github.com/beanstalk555/The-Unpinning-Game/releases) contains binaries for Windows, macOS, and Linux under Assets (bottom of the page).
+The easiest way to install the game is to use a pre-built binary. The [latest release](https://github.com/beanstalk555/The-Unpinning-Game/releases) contains binaries for Windows, macOS, and Linux under Assets.
 
 ## Building from source
 
