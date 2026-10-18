@@ -666,6 +666,7 @@ namespace
         bool showDebugExcessAreas = false;
         bool showGlobalCollisions = false;
         int debugFaceBeadIndex = -1;
+        int moveHoverRegion = -1;
         int pickClickBody = -1;
         Vector2 pickClickPos = {0.0f, 0.0f};
         bool pickPressedOnCanvas = false;
@@ -2941,7 +2942,33 @@ namespace
             }
         }
 
-        const auto drawEdgeBeadArc = [&](const Bead& bead, Color color) {
+        std::vector<char> hoverThick(necklace.beads.size(), 0);
+        if (app.moveHoverRegion >= 0 &&
+            app.moveHoverRegion < static_cast<int>(necklace.faceBeads.size())) {
+            const FaceBead& hoverFace =
+                necklace.faceBeads[static_cast<size_t>(app.moveHoverRegion)];
+            const auto markHover = [&](int bead) {
+                if (bead >= 0 && bead < static_cast<int>(hoverThick.size())) {
+                    hoverThick[static_cast<size_t>(bead)] = 1;
+                }
+            };
+            for (const int bead : hoverFace.boundaryBeads) {
+                markHover(bead);
+            }
+            for (const std::vector<int>& ring : hoverFace.holeBeads) {
+                for (const int bead : ring) {
+                    markHover(bead);
+                }
+            }
+        }
+        const auto beadArcWidth = [&](size_t beadIndex) {
+            if (beadIndex < hoverThick.size() && hoverThick[beadIndex]) {
+                return thickness * 2.0f;
+            }
+            return thickness;
+        };
+
+        const auto drawEdgeBeadArc = [&](const Bead& bead, Color color, float width) {
             if (bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
                 return;
             }
@@ -2949,16 +2976,17 @@ namespace
             const Vector2 n0 = toScreen(necklace.beads[bead.neighbors[0]].pos);
             const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
             DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
-                              TangentPoint(c, beadRadius, n1), thickness, color);
+                              TangentPoint(c, beadRadius, n1), width, color);
         };
 
         if (app.unknotMode || !app.loop) {
-            for (const Bead& bead : necklace.beads) {
+            for (size_t bi = 0; bi < necklace.beads.size(); ++bi) {
+                const Bead& bead = necklace.beads[bi];
                 if (bead.removed || bead.isVertex) {
                     continue;
                 }
                 const int strand = (bead.strand >= 0) ? bead.strand : 0;
-                drawEdgeBeadArc(bead, StrandColor(strand));
+                drawEdgeBeadArc(bead, StrandColor(strand), beadArcWidth(bi));
             }
             return;
         }
@@ -2986,6 +3014,7 @@ namespace
                     continue;
                 }
                 const Vector2 c = toScreen(bead.pos);
+                const float arcWidth = beadArcWidth(bi);
                 if (bead.isVertex) {
                     if (bead.sigmaCycle.size() < 4) {
                         continue;
@@ -3003,7 +3032,7 @@ namespace
                         const Vector2 n0 = toScreen(necklace.beads[bead.neighborOfHalfEdge[j]].pos);
                         const Vector2 n1 = toScreen(necklace.beads[bead.neighborOfHalfEdge[j + 2]].pos);
                         DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
-                                          TangentPoint(c, beadRadius, n1), thickness, color);
+                                          TangentPoint(c, beadRadius, n1), arcWidth, color);
                     }
                     // During an R3 slide the old triangle vertices keep exactly
                     // two links; draw the through-arc so the boundary is unbroken.
@@ -3023,7 +3052,7 @@ namespace
                             const Vector2 n1 =
                                 toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[1]]].pos);
                             DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
-                                              TangentPoint(c, beadRadius, n1), thickness, color);
+                                              TangentPoint(c, beadRadius, n1), arcWidth, color);
                         }
                     }
                 }
@@ -3038,7 +3067,7 @@ namespace
                     const Vector2 n0 = toScreen(necklace.beads[bead.neighbors[0]].pos);
                     const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
                     DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
-                                      TangentPoint(c, beadRadius, n1), thickness, color);
+                                      TangentPoint(c, beadRadius, n1), arcWidth, color);
                 }
             }
             if (homotopyActive) {
@@ -3056,12 +3085,13 @@ namespace
             }
         }
 
-        for (const Bead& bead : necklace.beads) {
+        for (size_t bi = 0; bi < necklace.beads.size(); ++bi) {
+            const Bead& bead = necklace.beads[bi];
             if (bead.removed || bead.isVertex || bead.edge != 0) {
                 continue;
             }
             const int strand = (bead.strand >= 0) ? bead.strand : 0;
-            drawEdgeBeadArc(bead, StrandColor(strand));
+            drawEdgeBeadArc(bead, StrandColor(strand), beadArcWidth(bi));
         }
 
         if (app.debug) {
@@ -3943,12 +3973,31 @@ namespace
                 }
                 app.wasAutoTightening = autoNow;
                 app.wasR3Active = r3Now;
+                int hover = -1;
+                const bool hoverAllowed =
+                    app.physics && CheckCollisionPointRec(mouse, canvas) && !tuningBlocks &&
+                    !app.dropdownOpen && !blockPlay && !app.physics->MoveActive() &&
+                    !app.physics->AutoTightening() && (!inGame || app.game.AcceptsMove());
+                if (hoverAllowed && app.necklace) {
+                    const int region = app.physics->PickRegionAt(gridMouse);
+                    if (region >= 0 &&
+                        region < static_cast<int>(app.necklace->faceBeads.size()) &&
+                        app.FaceBeadMoveHint(
+                            app.necklace->faceBeads[static_cast<size_t>(region)]) !=
+                            App::MoveHint::None) {
+                        hover = region;
+                    }
+                }
+                app.moveHoverRegion = hover;
                 if (debugTiming && app.physics) {
                     const auto physicsT1 = std::chrono::high_resolution_clock::now();
                     const double frameMs =
                         std::chrono::duration<double, std::milli>(physicsT1 - physicsT0).count();
                     app.physics->SetDebugFrameTotalMs(frameMs);
                 }
+            }
+            else {
+                app.moveHoverRegion = -1;
             }
             if (app.necklace && app.layout) {
                 DrawLayout(app, view, canvas);
@@ -4126,7 +4175,7 @@ namespace
                 {"The unpinning game is a 2-player game played on a loop in the plane (drawn in red) which intersects itself, with pins (drawn in green) in complementary regions. Each region has a certain number of self-intersections, called its degree, on its border. There is a special region called the outside region.",
                  0},
                 {"Your turn consists of two phases:", 0},
-                {"Attempt to decrease the number of self-intersections by clicking on regions of degree 0, 1, 2, or 3 without pins (except the outside region) to perform any number of 'Reidemeister' moves which change the loop. A move on a degree-1 region removes 1 self-intersection and awards you 1 point. A move on a degree-2 region removes 2 self-intersections and awards you 2 points. Moves on degree-0 and degree-3 regions do not change the number of self-intersections, so no points are awarded for them. When a move is performed on a degree-2 region, it often happens that two other regions become merged. In this case, only one pin will remain in the merged region (unless neither region had a pin). A region which becomes merged with the outside region always loses its pin.",
+                {"Attempt to decrease the number of self-intersections by clicking on regions of degree 0, 1, 2, or 3 without pins (except the outside region) to perform any number of 'Reidemeister' moves which change the loop. A move on a degree-1 region removes 1 self-intersection and awards you 1 point. A move on a degree-2 region removes 2 self-intersections and awards you 2 points.\n\nMoves on degree-0 and degree-3 regions do not change the number of self-intersections, so no points are awarded for them. When a move is performed on a degree-2 region, it often happens that two other regions become merged. In this case, only one pin will remain in the merged region (unless neither region had a pin). A region which becomes merged with the outside region always loses its pin.",
                  1},
                 {"Remove a pin, if there is at least one remaining.", 2},
                 {"The player with more points after the loop is gone wins!", 0},
@@ -4142,22 +4191,44 @@ namespace
             std::vector<RulesLine> bodyLines;
             bool prevList = false;
             for (const RulesBlock& block : blocks) {
-                if (!bodyLines.empty()) {
-                    const float gap = (prevList && block.number > 0) ? listGap : lineH;
-                    bodyLines.push_back({"", "", 0.0f, gap});
+                std::vector<std::string> paragraphs;
+                std::string paragraph;
+                for (const char* p = block.text; *p != '\0'; ++p) {
+                    if (*p == '\r') {
+                        continue;
+                    }
+                    if (*p == '\n') {
+                        if (!paragraph.empty()) {
+                            paragraphs.push_back(paragraph);
+                            paragraph.clear();
+                        }
+                        continue;
+                    }
+                    paragraph.push_back(*p);
+                }
+                if (!paragraph.empty()) {
+                    paragraphs.push_back(paragraph);
+                }
+                const float wrapW = block.number > 0 ? textW - gutter : textW;
+                const float indent = block.number > 0 ? gutter : 0.0f;
+                bool firstPara = true;
+                for (const std::string& part : paragraphs) {
+                    if (!bodyLines.empty()) {
+                        const float gap = !firstPara ? lineH
+                                          : ((prevList && block.number > 0) ? listGap : lineH);
+                        bodyLines.push_back({"", "", 0.0f, gap});
+                    }
+                    const std::string marker = (firstPara && block.number > 0)
+                                                   ? std::to_string(block.number) + "."
+                                                   : std::string();
+                    bool firstLine = true;
+                    for (const std::string& line : WrapText(gFont, part, bodySize, wrapW)) {
+                        bodyLines.push_back({firstLine ? marker : std::string(), line, indent, lineH});
+                        firstLine = false;
+                    }
+                    firstPara = false;
                 }
                 prevList = block.number > 0;
-                const float wrapW = block.number > 0 ? textW - gutter : textW;
-                const std::vector<std::string> wrapped =
-                    WrapText(gFont, block.text, bodySize, wrapW);
-                const std::string marker =
-                    block.number > 0 ? std::to_string(block.number) + "." : std::string();
-                bool first = true;
-                for (const std::string& line : wrapped) {
-                    bodyLines.push_back({first ? marker : std::string(), line,
-                                         block.number > 0 ? gutter : 0.0f, lineH});
-                    first = false;
-                }
             }
             float bodyH = 0.0f;
             for (const RulesLine& line : bodyLines) {
