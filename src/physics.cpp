@@ -20,7 +20,7 @@ namespace
     constexpr int kMinStrandEdgeBeads = 6;
     // Per-link compression (stiffness times overlap) below which an inserted
     // bead is drawn. Zero leaves a gap while the last overlap settles.
-    constexpr double kInsertArcCompression = 15.0;
+    constexpr double kInsertArcCompression = 30; // was 15
 
     class ScopedTimer
     {
