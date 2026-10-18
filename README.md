@@ -14,7 +14,7 @@ Your turn consists of two phases:
 
 1. Attempt to decrease the number of self-intersections by clicking on regions of degree 0, 1, 2, or 3 without pins (except the outside region) to perform any number of 'Reidemeister' moves which change the loop. A move on a degree-1 region removes 1 self-intersection and awards you 1 point. A move on a degree-2 region removes 2 self-intersections and awards you 2 points.
 
-  Moves on degree-0 and degree-3 regions do not change the number of self-intersections, so no points are awarded for them. When a move is performed on a degree-2 region, it often happens that two other regions become merged. In this case, only one pin will remain in the merged region (unless neither region had a pin). A region which becomes merged with the outside region always loses its pin.
+    Moves on degree-0 and degree-3 regions do not change the number of self-intersections, so no points are awarded for them. When a move is performed on a degree-2 region, it often happens that two other regions become merged. In this case, only one pin will remain in the merged region (unless neither region had a pin). A region which becomes merged with the outside region always loses its pin.
 
 2. Remove a pin, if there is at least one remaining.
 
