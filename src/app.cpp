@@ -35,6 +35,37 @@
 
 namespace
 {
+    // Raylib's high-DPI centering can park the window off-screen. Give the
+    // restored window a size that fits, with the title bar on-screen, then
+    // open maximized into the work area.
+    void OpenWindowMaximized()
+    {
+        const int mon = GetCurrentMonitor();
+        const Vector2 origin = GetMonitorPosition(mon);
+        const int monX = static_cast<int>(origin.x);
+        const int monY = static_cast<int>(origin.y);
+        const int monW = GetMonitorWidth(mon);
+        const int monH = GetMonitorHeight(mon);
+        if (monW > 0 && monH > 0) {
+            const int topMargin = 48;
+            const int bottomMargin = 72;
+            const int maxH = monH > topMargin + bottomMargin ? monH - topMargin - bottomMargin : monH;
+            int winW = 1460;
+            int winH = 850;
+            if (winW > monW) {
+                winW = monW;
+            }
+            if (winH > maxH) {
+                winH = maxH;
+            }
+            SetWindowSize(winW, winH);
+            const int x = monX + (monW - winW) / 2;
+            const int y = monY + topMargin + (maxH > winH ? (maxH - winH) / 2 : 0);
+            SetWindowPosition(x, y);
+        }
+        MaximizeWindow();
+    }
+
     const Color kBackground = {245, 245, 248, 255};
     const Color kHighlightFill = {255, 220, 40, 90};
     const Color kTextDark = {40, 42, 48, 255};
@@ -3173,6 +3204,9 @@ namespace
         const float canvasTop = gameOver ? 0.0f : (inGame ? gameBarH : (row4 + 36.0f));
         const Rectangle canvas = {0.0f, canvasTop, static_cast<float>(screenWidth),
                                   static_cast<float>(screenHeight) - canvasTop};
+        if (IsWindowResized() && app.layout) {
+            BeginViewFit(app, canvas);
+        }
 
         BeginDrawing();
         ClearBackground(kBackground);
@@ -4220,6 +4254,7 @@ void RunApp()
     // Render at the monitor scale and multisample curves, on macOS and Windows.
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_WINDOW_HIGHDPI | FLAG_MSAA_4X_HINT);
     InitWindow(1460, 850, "The Unpinning Game");
+    OpenWindowMaximized();
     SetExitKey(KEY_NULL); // ESC is used to unfocus the textbox
     SetTargetFPS(60);
     LoadUiFont();

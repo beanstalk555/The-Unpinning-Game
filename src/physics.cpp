@@ -4026,7 +4026,7 @@ void Physics::R3FortifyStep()
 namespace
 {
     // Sample points along each curve. Does not change how long the morph lasts.
-    constexpr int kR3HomotopySubdivisions = 16;
+    constexpr int kR3HomotopySubdivisions = 32;
     // Displayed frames from t = 0 through t = 1.
     constexpr int kR3HomotopyFrames = 11;
     constexpr float kTwoPi = 6.28318530718f;
