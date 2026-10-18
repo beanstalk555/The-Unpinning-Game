@@ -660,6 +660,7 @@ namespace
         PhysicsTuningUI tuningUI;
         bool debug = false;
         bool showBeads = false;
+        bool showLabels = true;
         bool highlightReidemeister = false;
         bool showDebugTiming = true;
         bool showDebugExcessAreas = false;
@@ -1629,6 +1630,7 @@ namespace
             ClearR3Undo();
             dropdownOpen = false;
             tuningUI.open = false;
+            showLabels = false;
             game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
             pendingGameFit = true;
         }
@@ -1640,6 +1642,7 @@ namespace
             ClearR3Undo();
             dropdownOpen = false;
             tuningUI.open = false;
+            showLabels = false;
             game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
             RequestViewFit();
         }
@@ -1648,6 +1651,7 @@ namespace
         {
             game.MarkEarlyExit();
             ClearR3Undo();
+            showLabels = true;
             dropdownOpen = false;
             RequestViewFit();
         }
@@ -1657,6 +1661,7 @@ namespace
             RestoreGameStart();
             ClearR3Undo();
             game.Deactivate();
+            showLabels = true;
             dropdownOpen = false;
             RequestViewFit();
         }
@@ -2848,7 +2853,8 @@ namespace
                 std::vector<size_t> metal;
                 metal.reserve(regions.size());
                 for (size_t i = 0; i < regions.size(); ++i) {
-                    if (!regions[i].highlighted && regions[i].moveHint != App::MoveHint::None) {
+                    if (!regions[i].highlighted && regions[i].moveHint != App::MoveHint::None &&
+                        regions[i].moveHint != App::MoveHint::R0) {
                         metal.push_back(i);
                     }
                 }
@@ -2898,7 +2904,8 @@ namespace
                 DrawRing(c, beadRadius - outline, beadRadius, 0.0f, 360.0f, 48, kBeadOutline);
             }
         }
-        // Face beads are always labeled; the disk is drawn only when pinned.
+        // Pinned face beads always draw. Unpinned ones draw with the edge-bead
+        // style when show beads is on. Labels are optional.
         const Color kOutsideFill = {210, 55, 50, 255};
         const Color kOutsideEdge = {140, 25, 22, 255};
         const Color kExcessHighlight = {255, 120, 0, 255};
@@ -2917,15 +2924,21 @@ namespace
                 }
                 DrawRing(c, beadRadius - ringThickness, beadRadius, 0.0f, 360.0f, 48, ringColor);
             }
-            const std::string text = std::to_string(faceBead.label);
-            float fontSize = Clampf(beadRadius * 1.15f, 8.0f, 40.0f);
-            float textWidth = TextWidthFont(gFontBold, text, fontSize);
-            if (textWidth > beadRadius * 1.5f) {
-                fontSize *= beadRadius * 1.5f / textWidth;
-                textWidth = TextWidthFont(gFontBold, text, fontSize);
+            else if (app.showBeads) {
+                DrawCircleV(c, beadRadius, WHITE);
+                DrawRing(c, beadRadius - outline, beadRadius, 0.0f, 360.0f, 48, kBeadOutline);
             }
-            DrawTextFont(gFontBold, text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f,
-                         fontSize, outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
+            if (app.showLabels) {
+                const std::string text = std::to_string(faceBead.label);
+                float fontSize = Clampf(beadRadius * 1.15f, 8.0f, 40.0f);
+                float textWidth = TextWidthFont(gFontBold, text, fontSize);
+                if (textWidth > beadRadius * 1.5f) {
+                    fontSize *= beadRadius * 1.5f / textWidth;
+                    textWidth = TextWidthFont(gFontBold, text, fontSize);
+                }
+                DrawTextFont(gFontBold, text, c.x - textWidth / 2.0f, c.y - fontSize / 2.0f,
+                             fontSize, outside ? Color{80, 10, 10, 255} : Color{15, 35, 12, 255});
+            }
         }
 
         const auto drawEdgeBeadArc = [&](const Bead& bead, Color color) {
@@ -3233,6 +3246,23 @@ namespace
         Rectangle allowanceBox = {0.0f, 0.0f, 0.0f, 0.0f};
         bool uiHoldsClick = false;
 
+        const auto checkbox = [&](float cx, float cy, const char* label, bool* value, bool enabled) {
+            const Rectangle box = {cx, cy + 5.0f, 20.0f, 20.0f};
+            const Rectangle hit = {cx, cy, 28.0f + TextWidth(label, 18.0f), 30.0f};
+            if (enabled && click && CheckCollisionPointRec(mouse, hit)) {
+                *value = !*value;
+                uiHoldsClick = true;
+            }
+            DrawRectangleRec(box, enabled ? WHITE : Color{225, 226, 230, 255});
+            DrawRectangleLinesEx(box, 2.0f, kBorder);
+            if (*value) {
+                DrawRectangle(static_cast<int>(box.x) + 4, static_cast<int>(box.y) + 4, 12, 12,
+                              enabled ? kAccent : Color{170, 172, 180, 255});
+            }
+            DrawTextS(label, box.x + 28.0f, cy + 6.0f, 18.0f, enabled ? kTextDark : kTextDim);
+            return hit.width;
+        };
+
         if (!inGame) {
         // ---- Row 0: draw / generate ----
         float x = pad;
@@ -3266,8 +3296,8 @@ namespace
             x += w + 12.0f;
 
             const Color labelColor = drawing ? kTextDim : kTextDark;
-            DrawTextS("with approximately", x, row0 + 6.0f, 18.0f, labelColor);
-            x += TextWidth("with approximately", 18.0f) + 8.0f;
+            DrawTextS("with at least", x, row0 + 6.0f, 18.0f, labelColor);
+            x += TextWidth("with at least", 18.0f) + 8.0f;
             const Rectangle countRect = {x, row0 + 1.0f, 56.0f, 28.0f};
             if (TextBoxFrame(app.countBox, countRect, 17.0f, mouse, click, true, !drawing) && !drawing) {
                 app.GenerateRandom();
@@ -3303,22 +3333,6 @@ namespace
             DrawTextS("meshlike", x, row0 + 7.0f, 17.0f, kTextDim);
             x += TextWidth("meshlike", 17.0f) + 30.0f;
         }
-
-        const auto checkbox = [&](float cx, float cy, const char* label, bool* value, bool enabled) {
-            const Rectangle box = {cx, cy + 5.0f, 20.0f, 20.0f};
-            const Rectangle hit = {cx, cy, 28.0f + TextWidth(label, 18.0f), 30.0f};
-            if (enabled && click && CheckCollisionPointRec(mouse, hit)) {
-                *value = !*value;
-            }
-            DrawRectangleRec(box, enabled ? WHITE : Color{225, 226, 230, 255});
-            DrawRectangleLinesEx(box, 2.0f, kBorder);
-            if (*value) {
-                DrawRectangle(static_cast<int>(box.x) + 4, static_cast<int>(box.y) + 4, 12, 12,
-                              enabled ? kAccent : Color{170, 172, 180, 255});
-            }
-            DrawTextS(label, box.x + 28.0f, cy + 6.0f, 18.0f, enabled ? kTextDark : kTextDim);
-            return hit.width;
-        };
 
         // Strand options, to the right of the slider (mutually exclusive).
         {
@@ -3410,6 +3424,7 @@ namespace
             DrawTextS(strandText, rx, row2 + 6.0f, 18.0f, kTextDim);
             rx += TextWidth(strandText, 18.0f) + 16.0f;
         }
+        rx += checkbox(rx, row2, "show labels", &app.showLabels, !drawing) + 16.0f;
         rx += checkbox(rx, row2, "show beads", &app.showBeads, !drawing) + 16.0f;
 #ifdef DEBUG_UI
         rx += checkbox(rx, row2, "debug", &app.debug, !drawing) + 16.0f;
@@ -3521,18 +3536,21 @@ namespace
             }
             const float reidX = unpinAllX + unpinAllW + 16.0f;
             const float reidW =
-                checkbox(reidX, row3, "Highlight Reidemeister regions",
+                checkbox(reidX, row3, "show available moves",
                          &app.highlightReidemeister, !drawing);
             const float afterButtonsX = reidX + reidW + 16.0f;
             if (app.physics) {
+                float tangleX = afterButtonsX;
+#ifdef DEBUG_UI
                 char buf[128];
                 std::snprintf(buf, sizeof(buf),
                               "tension: %.2f   (stretch %.2f  +  compression %.2f)",
                               app.physics->TotalTension(), app.physics->StretchTension(),
                               app.physics->CompressionTension());
                 DrawTextS(buf, afterButtonsX, row3 + 6.0f, 18.0f, kTextDim);
+                tangleX = afterButtonsX + TextWidth(buf, 18.0f) + 12.0f;
+#endif
                 if (app.physics->Tangled()) {
-                    const float tangleX = afterButtonsX + TextWidth(buf, 18.0f) + 12.0f;
                     DrawTextS("tangle", tangleX, row3 + 6.0f, 18.0f, kErrorRed);
                 }
             }
@@ -3716,6 +3734,13 @@ namespace
                     app.ResolveTangleReset();
                 }
             }
+        }
+
+        if (inGame && !app.game.RulesOpen() && !app.game.ExitPrompt()) {
+            float cx = pad;
+            const float cy = static_cast<float>(screenHeight) - pad - 30.0f;
+            cx += checkbox(cx, cy, "show available moves", &app.highlightReidemeister, true) + 16.0f;
+            checkbox(cx, cy, "show labels", &app.showLabels, true);
         }
 
         // ---- Canvas ----
@@ -4093,25 +4118,53 @@ namespace
             const float bodySize = 20.0f;
             const float lineH = 28.0f;
             const float textW = boxW - 2.0f * inset;
-            const char* paragraphs[] = {
-                "The Unpinning Game is a 2-player game played on a loop in the plane (drawn in red) which intersects itself, with pins (drawn in green) in numerically-labeled complementary regions.",
-                "Your turn consists of two phases:",
-                "1) Click on the numerically-labeled regions without pins, attempting to decrease the number of self-intersections. You are awarded one point for each self-intersection that you remove. You can perform moves only on regions with zero, one, two, or three adjacent intersections (Reidemeister moves).",
-                "2) Remove a pin, if there is at least one remaining.",
-                "The winner is the player with more points at the end.",
+            struct RulesBlock {
+                const char* text;
+                int number;
             };
-            std::vector<std::string> bodyLines;
-            for (const char* paragraph : paragraphs) {
+            const RulesBlock blocks[] = {
+                {"The unpinning game is a 2-player game played on a loop in the plane (drawn in red) which intersects itself, with pins (drawn in green) in complementary regions. Each region has a certain number of self-intersections, called its degree, on its border. There is a special region called the outside region.",
+                 0},
+                {"Your turn consists of two phases:", 0},
+                {"Attempt to decrease the number of self-intersections by clicking on regions of degree 0, 1, 2, or 3 without pins (except the outside region) to perform any number of 'Reidemeister' moves which change the loop. A move on a degree-1 region removes 1 self-intersection and awards you 1 point. A move on a degree-2 region removes 2 self-intersections and awards you 2 points. Moves on degree-0 and degree-3 regions do not change the number of self-intersections, so no points are awarded for them. When a move is performed on a degree-2 region, it often happens that two other regions become merged. In this case, only one pin will remain in the merged region (unless neither region had a pin). A region which becomes merged with the outside region always loses its pin.",
+                 1},
+                {"Remove a pin, if there is at least one remaining.", 2},
+                {"The player with more points after the loop is gone wins!", 0},
+            };
+            struct RulesLine {
+                std::string marker;
+                std::string text;
+                float indent;
+                float advance;
+            };
+            const float gutter = 34.0f;
+            const float listGap = 14.0f;
+            std::vector<RulesLine> bodyLines;
+            bool prevList = false;
+            for (const RulesBlock& block : blocks) {
                 if (!bodyLines.empty()) {
-                    bodyLines.push_back("");
+                    const float gap = (prevList && block.number > 0) ? listGap : lineH;
+                    bodyLines.push_back({"", "", 0.0f, gap});
                 }
+                prevList = block.number > 0;
+                const float wrapW = block.number > 0 ? textW - gutter : textW;
                 const std::vector<std::string> wrapped =
-                    WrapText(gFont, paragraph, bodySize, textW);
-                bodyLines.insert(bodyLines.end(), wrapped.begin(), wrapped.end());
+                    WrapText(gFont, block.text, bodySize, wrapW);
+                const std::string marker =
+                    block.number > 0 ? std::to_string(block.number) + "." : std::string();
+                bool first = true;
+                for (const std::string& line : wrapped) {
+                    bodyLines.push_back({first ? marker : std::string(), line,
+                                         block.number > 0 ? gutter : 0.0f, lineH});
+                    first = false;
+                }
+            }
+            float bodyH = 0.0f;
+            for (const RulesLine& line : bodyLines) {
+                bodyH += line.advance;
             }
             const float btnH = 36.0f;
-            const float boxH = inset + titleSize + 18.0f +
-                               static_cast<float>(bodyLines.size()) * lineH + 22.0f + btnH + inset;
+            const float boxH = inset + titleSize + 18.0f + bodyH + 22.0f + btnH + inset;
             const Rectangle box = {(static_cast<float>(screenWidth) - boxW) * 0.5f,
                                    (static_cast<float>(screenHeight) - boxH) * 0.5f, boxW, boxH};
             DrawRectangleRounded(box, 0.04f, 8, Color{252, 252, 255, 255});
@@ -4122,11 +4175,14 @@ namespace
             DrawTextFont(gFontBold, rulesTitle, box.x + (boxW - rulesTitleW) * 0.5f, y, titleSize,
                          kTextDark);
             y += titleSize + 18.0f;
-            for (const std::string& line : bodyLines) {
-                if (!line.empty()) {
-                    DrawTextS(line, box.x + inset, y, bodySize, kTextDark);
+            for (const RulesLine& line : bodyLines) {
+                if (!line.marker.empty()) {
+                    DrawTextFont(gFontBold, line.marker, box.x + inset, y, bodySize, kAccent);
                 }
-                y += lineH;
+                if (!line.text.empty()) {
+                    DrawTextS(line.text, box.x + inset + line.indent, y, bodySize, kTextDark);
+                }
+                y += line.advance;
             }
             y += 8.0f;
             const std::string backLabel = "Back";
