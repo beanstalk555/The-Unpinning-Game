@@ -59,6 +59,9 @@ public:
     // Advance the simulation by one displayed frame.
     void Step();
 
+    // Clear arcDeferred once both links of an inserted bead are at rest length.
+    void ReleaseSettledInserts();
+
     // Step() for the resting state: additionally sheds one excess bead from a
     // monogon (down to 5 beads) or a circle (down to 6) every
     // params.passiveTightenInterval frames. No-op while a move, auto-tighten

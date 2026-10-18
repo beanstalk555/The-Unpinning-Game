@@ -18,6 +18,9 @@ namespace
 {
     constexpr float kPiF = 3.14159265358979323846f;
     constexpr int kMinStrandEdgeBeads = 6;
+    // Per-link compression (stiffness times overlap) below which an inserted
+    // bead is drawn. Zero leaves a gap while the last overlap settles.
+    constexpr double kInsertArcCompression = 15.0;
 
     class ScopedTimer
     {
@@ -1633,6 +1636,7 @@ void Physics::ReinsertEdgeBead(int bead, int neighborA, int neighborC)
     b.pos = {(pa.x + pc.x) * 0.5f, (pa.y + pc.y) * 0.5f};
     b.neighbors[0] = neighborA;
     b.neighbors[1] = neighborC;
+    b.arcBridge = false;
     ReplaceNeighborOnce(neighborA, neighborC, bead);
     ReplaceNeighborOnce(neighborC, neighborA, bead);
     if (bead < static_cast<int>(vel_.size())) {
@@ -1665,6 +1669,8 @@ void Physics::RemoveEdgeBead(int bead)
     ReplaceNeighborOnce(a, bead, c);
     ReplaceNeighborOnce(c, bead, a);
     b.removed = true;
+    b.arcDeferred = false;
+    b.arcBridge = true;
     structureDirty_ = true;
 }
 
@@ -1687,6 +1693,7 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
         }
         ReinsertEdgeBead(i, neighborA, neighborC);
         neck_->beads[static_cast<size_t>(i)].strand = strand;
+        neck_->beads[static_cast<size_t>(i)].arcDeferred = true;
         return i;
     }
 
@@ -1700,6 +1707,7 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
     bead.pos = {(pa.x + pc.x) * 0.5f, (pa.y + pc.y) * 0.5f};
     bead.neighbors[0] = neighborA;
     bead.neighbors[1] = neighborC;
+    bead.arcDeferred = true;
     const int idx = BeadCount();
     ReplaceNeighborOnce(neighborA, neighborC, idx);
     ReplaceNeighborOnce(neighborC, neighborA, idx);
@@ -1707,6 +1715,64 @@ int Physics::InsertEdgeBeadBetween(int neighborA, int neighborC, int edge)
     vel_.push_back(Vector2{0.0f, 0.0f});
     structureDirty_ = true;
     return idx;
+}
+
+void Physics::ReleaseSettledInserts()
+{
+    if (neck_ == nullptr) {
+        return;
+    }
+    const int count = BeadCount();
+    for (int i = 0; i < count; ++i) {
+        Bead& bead = neck_->beads[static_cast<size_t>(i)];
+        if (!bead.arcDeferred) {
+            continue;
+        }
+        const int a = bead.neighbors[0];
+        const int c = bead.neighbors[1];
+        if (bead.removed || bead.isVertex || a < 0 || c < 0 || a >= count || c >= count) {
+            bead.arcDeferred = false;
+            continue;
+        }
+        const Vector2 p = PosOf(i);
+        const Vector2 pa = PosOf(a);
+        const Vector2 pc = PosOf(c);
+        const auto linkCompression = [&](Vector2 q) {
+            const float overlap = diameter_ - std::hypot(q.x - p.x, q.y - p.y);
+            if (overlap <= 0.0f) {
+                return 0.0;
+            }
+            return static_cast<double>(params_->springStiffness) * static_cast<double>(overlap);
+        };
+        if (linkCompression(pa) < kInsertArcCompression &&
+            linkCompression(pc) < kInsertArcCompression) {
+            bead.arcDeferred = false;
+        }
+    }
+    for (int i = 0; i < count; ++i) {
+        Bead& bead = neck_->beads[static_cast<size_t>(i)];
+        if (!bead.arcBridge) {
+            continue;
+        }
+        const int a = bead.neighbors[0];
+        const int c = bead.neighbors[1];
+        if (!bead.removed || a < 0 || c < 0 || a >= count || c >= count ||
+            !NodeReferences(a, c) || !NodeReferences(c, a)) {
+            bead.arcBridge = false;
+            continue;
+        }
+        const Vector2 pa = PosOf(a);
+        const Vector2 pc = PosOf(c);
+        const float len = std::hypot(pc.x - pa.x, pc.y - pa.y);
+        const float extra = len - diameter_;
+        const double stretch = extra > 0.0f
+                                   ? static_cast<double>(params_->springStiffness) *
+                                         static_cast<double>(extra)
+                                   : 0.0;
+        if (stretch < kInsertArcCompression) {
+            bead.arcBridge = false;
+        }
+    }
 }
 
 void Physics::MaintainBeadSpacingDuringDrag()
@@ -2790,6 +2856,7 @@ void Physics::StopAutoTighten()
             pending.removedBead < BeadCount() &&
             neck_->beads[static_cast<size_t>(pending.removedBead)].removed) {
             ReinsertEdgeBead(pending.removedBead, pending.neighborA, pending.neighborC);
+            neck_->beads[static_cast<size_t>(pending.removedBead)].arcDeferred = true;
         }
     }
     autoActive_ = false;
@@ -2844,6 +2911,7 @@ void Physics::AutoStep()
                         continue;
                     }
                     ReinsertEdgeBead(pending.removedBead, pending.neighborA, pending.neighborC);
+            neck_->beads[static_cast<size_t>(pending.removedBead)].arcDeferred = true;
                     pending.settled = true;
                     reinsertedEdges.insert(k);
                 }

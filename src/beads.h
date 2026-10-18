@@ -32,6 +32,12 @@ struct Bead
     // neighbors along the +k direction (vertex or edge beads).
     int edge = -1;
     int neighbors[2] = {-1, -1};
+    // Set when this bead is spliced into a live strand. Drawing keeps the old
+    // join until both new links have no compression.
+    bool arcDeferred = false;
+    // Set when this bead is removed from a strand. Drawing fills the gap
+    // between its former neighbors until that link's stretch is low.
+    bool arcBridge = false;
     // Color index for crossing-free circle beads (and packed unknot rings).
     // Crossing edge beads keep -1 and use Multiloop::strandOfEdge instead.
     int strand = -1;

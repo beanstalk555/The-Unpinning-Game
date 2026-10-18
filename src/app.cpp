@@ -2968,15 +2968,72 @@ namespace
             return thickness;
         };
 
-        const auto drawEdgeBeadArc = [&](const Bead& bead, Color color, float width) {
-            if (bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
+        const int beadCount = static_cast<int>(necklace.beads.size());
+        const auto visualNeighbor = [&](int self, int neighbor) {
+            int prev = self;
+            int cur = neighbor;
+            for (int guard = 0; guard < 8; ++guard) {
+                if (cur < 0 || cur >= beadCount) {
+                    return neighbor;
+                }
+                const Bead& hop = necklace.beads[static_cast<size_t>(cur)];
+                if (hop.removed || hop.isVertex || !hop.arcDeferred) {
+                    return cur;
+                }
+                const int a = hop.neighbors[0];
+                const int c = hop.neighbors[1];
+                int far = -1;
+                if (a == prev) {
+                    far = c;
+                }
+                else if (c == prev) {
+                    far = a;
+                }
+                else {
+                    return cur;
+                }
+                if (far < 0 || far == cur) {
+                    return cur;
+                }
+                prev = cur;
+                cur = far;
+            }
+            return cur;
+        };
+
+        const auto drawEdgeBeadArc = [&](size_t bi, Color color, float width) {
+            const Bead& bead = necklace.beads[bi];
+            if (bead.arcDeferred) {
+                return;
+            }
+            const int n0i = visualNeighbor(static_cast<int>(bi), bead.neighbors[0]);
+            const int n1i = visualNeighbor(static_cast<int>(bi), bead.neighbors[1]);
+            if (n0i < 0 || n1i < 0 || n0i >= beadCount || n1i >= beadCount) {
                 return;
             }
             const Vector2 c = toScreen(bead.pos);
-            const Vector2 n0 = toScreen(necklace.beads[bead.neighbors[0]].pos);
-            const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
+            const Vector2 n0 = toScreen(necklace.beads[static_cast<size_t>(n0i)].pos);
+            const Vector2 n1 = toScreen(necklace.beads[static_cast<size_t>(n1i)].pos);
             DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
                               TangentPoint(c, beadRadius, n1), width, color);
+        };
+
+        const auto drawArcBridge = [&](const Bead& bead, Color color) {
+            const int a = bead.neighbors[0];
+            const int c = bead.neighbors[1];
+            if (a < 0 || c < 0 || a >= beadCount || c >= beadCount) {
+                return;
+            }
+            const bool thick = (static_cast<size_t>(a) < hoverThick.size() && hoverThick[static_cast<size_t>(a)]) ||
+                               (static_cast<size_t>(c) < hoverThick.size() && hoverThick[static_cast<size_t>(c)]);
+            const float width = thick ? thickness * 2.0f : thickness;
+            const Vector2 ca = toScreen(necklace.beads[static_cast<size_t>(a)].pos);
+            const Vector2 cc = toScreen(necklace.beads[static_cast<size_t>(c)].pos);
+            const Vector2 pa = TangentPoint(ca, beadRadius, cc);
+            const Vector2 pc = TangentPoint(cc, beadRadius, ca);
+            DrawLineEx(pa, pc, width, color);
+            DrawCircleV(pa, width * 0.5f, color);
+            DrawCircleV(pc, width * 0.5f, color);
         };
 
         if (app.unknotMode || !app.loop) {
@@ -2986,7 +3043,14 @@ namespace
                     continue;
                 }
                 const int strand = (bead.strand >= 0) ? bead.strand : 0;
-                drawEdgeBeadArc(bead, StrandColor(strand), beadArcWidth(bi));
+                drawEdgeBeadArc(bi, StrandColor(strand), beadArcWidth(bi));
+            }
+            for (const Bead& bead : necklace.beads) {
+                if (!bead.removed || !bead.arcBridge) {
+                    continue;
+                }
+                const int strand = (bead.strand >= 0) ? bead.strand : 0;
+                drawArcBridge(bead, StrandColor(strand));
             }
             return;
         }
@@ -3026,11 +3090,15 @@ namespace
                             loop.strandOfEdge[static_cast<size_t>(edge)] != strand) {
                             continue;
                         }
-                        if (bead.neighborOfHalfEdge[j] < 0 || bead.neighborOfHalfEdge[j + 2] < 0) {
+                        const int left =
+                            visualNeighbor(static_cast<int>(bi), bead.neighborOfHalfEdge[j]);
+                        const int right =
+                            visualNeighbor(static_cast<int>(bi), bead.neighborOfHalfEdge[j + 2]);
+                        if (left < 0 || right < 0 || left >= beadCount || right >= beadCount) {
                             continue;
                         }
-                        const Vector2 n0 = toScreen(necklace.beads[bead.neighborOfHalfEdge[j]].pos);
-                        const Vector2 n1 = toScreen(necklace.beads[bead.neighborOfHalfEdge[j + 2]].pos);
+                        const Vector2 n0 = toScreen(necklace.beads[static_cast<size_t>(left)].pos);
+                        const Vector2 n1 = toScreen(necklace.beads[static_cast<size_t>(right)].pos);
                         DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
                                           TangentPoint(c, beadRadius, n1), arcWidth, color);
                     }
@@ -3047,10 +3115,15 @@ namespace
                         const int edge = std::abs(bead.sigmaCycle[static_cast<size_t>(intact[0])]);
                         if (edge >= 1 && edge <= loop.numEdges &&
                             loop.strandOfEdge[static_cast<size_t>(edge)] == strand) {
-                            const Vector2 n0 =
-                                toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[0]]].pos);
-                            const Vector2 n1 =
-                                toScreen(necklace.beads[bead.neighborOfHalfEdge[intact[1]]].pos);
+                            const int left = visualNeighbor(static_cast<int>(bi),
+                                                              bead.neighborOfHalfEdge[intact[0]]);
+                            const int right = visualNeighbor(static_cast<int>(bi),
+                                                              bead.neighborOfHalfEdge[intact[1]]);
+                            if (left < 0 || right < 0 || left >= beadCount || right >= beadCount) {
+                                continue;
+                            }
+                            const Vector2 n0 = toScreen(necklace.beads[static_cast<size_t>(left)].pos);
+                            const Vector2 n1 = toScreen(necklace.beads[static_cast<size_t>(right)].pos);
                             DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
                                               TangentPoint(c, beadRadius, n1), arcWidth, color);
                         }
@@ -3061,14 +3134,35 @@ namespace
                         loop.strandOfEdge[bead.edge] != strand) {
                         continue;
                     }
-                    if (bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
-                        continue; // cut terminal during an R3 slide
+                    if (bead.arcDeferred || bead.neighbors[0] < 0 || bead.neighbors[1] < 0) {
+                        continue; // cut terminal during an R3 slide, or a fresh insert
                     }
-                    const Vector2 n0 = toScreen(necklace.beads[bead.neighbors[0]].pos);
-                    const Vector2 n1 = toScreen(necklace.beads[bead.neighbors[1]].pos);
+                    const int n0i = visualNeighbor(static_cast<int>(bi), bead.neighbors[0]);
+                    const int n1i = visualNeighbor(static_cast<int>(bi), bead.neighbors[1]);
+                    if (n0i < 0 || n1i < 0 || n0i >= beadCount || n1i >= beadCount) {
+                        continue;
+                    }
+                    const Vector2 n0 = toScreen(necklace.beads[static_cast<size_t>(n0i)].pos);
+                    const Vector2 n1 = toScreen(necklace.beads[static_cast<size_t>(n1i)].pos);
                     DrawOrthogonalArc(c, beadRadius, TangentPoint(c, beadRadius, n0),
                                       TangentPoint(c, beadRadius, n1), arcWidth, color);
                 }
+            }
+            for (const Bead& bead : necklace.beads) {
+                if (!bead.removed || !bead.arcBridge) {
+                    continue;
+                }
+                int bridgeStrand = bead.strand;
+                if (bridgeStrand < 0) {
+                    if (bead.edge < 1 || bead.edge > loop.numEdges) {
+                        continue;
+                    }
+                    bridgeStrand = loop.strandOfEdge[static_cast<size_t>(bead.edge)];
+                }
+                if (bridgeStrand != strand) {
+                    continue;
+                }
+                drawArcBridge(bead, color);
             }
             if (homotopyActive) {
                 for (size_t a = 0; a < homotopyPolys.size(); ++a) {
@@ -3091,7 +3185,13 @@ namespace
                 continue;
             }
             const int strand = (bead.strand >= 0) ? bead.strand : 0;
-            drawEdgeBeadArc(bead, StrandColor(strand), beadArcWidth(bi));
+            drawEdgeBeadArc(bi, StrandColor(strand), beadArcWidth(bi));
+        }
+        for (const Bead& bead : necklace.beads) {
+            if (!bead.removed || !bead.arcBridge || bead.edge != 0 || bead.strand >= 0) {
+                continue;
+            }
+            drawArcBridge(bead, StrandColor(0));
         }
 
         if (app.debug) {
@@ -3998,6 +4098,9 @@ namespace
             }
             else {
                 app.moveHoverRegion = -1;
+            }
+            if (app.physics) {
+                app.physics->ReleaseSettledInserts();
             }
             if (app.necklace && app.layout) {
                 DrawLayout(app, view, canvas);
