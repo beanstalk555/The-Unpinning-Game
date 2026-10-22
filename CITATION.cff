@@ -1,0 +1,16 @@
+cff-version: 1.2.0
+message: "If you use or modify this software for your own work, please cite as below."
+authors:
+- family-names: "Israk"
+  given-names: "Araf"
+- family-names: "Simon"
+  given-names: "Christopher-Lloyd"
+  orcid: "https://orcid.org/0000-0002-8195-2550"
+- family-names: "Stucky"
+  given-names: "Ben"
+  orcid: "https://orcid.org/0000-0003-4293-6475"
+title: "The Unpinning Game - desktop version"
+version: 0.0.4
+doi: none
+date-released: 2024-10-17
+url: "https://github.com/beanstalk555/The-Unpinning-Game"
