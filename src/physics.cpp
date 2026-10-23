@@ -3991,9 +3991,9 @@ void Physics::R3PreHoneycombStep()
             return;
         }
         const float length = EdgeChainLength(bestEdge);
-        const double threshold =
-            params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
-        if (bestTension < threshold) {
+        // const double threshold =
+        //    params_->tensionThreshold * std::sqrt(static_cast<double>(std::max(length, 1.0f)));
+        if (bestTension < params_->tensionThreshold) { // was threshold
             r3PreSub_ = R3PreSub::NeedRemove;
             return;
         }
