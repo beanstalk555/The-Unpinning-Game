@@ -12,7 +12,7 @@ enum class RatioCombineMode
 struct PhysicsParams
 {
     float springStiffness = 500.0f;
-    float collisionStiffness = 250.0f;
+    float collisionStiffness = 500.0f; // increased from 250 to address issue 3
     float dragStiffness = 250.0f;
     float damping = 80.0f;
     float dt = 1.0f / 60.0f;
