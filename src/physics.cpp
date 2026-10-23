@@ -20,7 +20,9 @@ namespace
     constexpr int kMinStrandEdgeBeads = 6;
     // Per-link compression (stiffness times overlap) below which an inserted
     // bead is drawn. Zero leaves a gap while the last overlap settles.
-    constexpr double kInsertArcCompression = 30; // was 15
+    constexpr double kInsertArcCompression = 30;
+    // Stretch on a freshly joined link below which the removal bridge is dropped.
+    constexpr double kRemoveArcCompression = 30;
 
     class ScopedTimer
     {
@@ -1769,7 +1771,7 @@ void Physics::ReleaseSettledInserts()
                                    ? static_cast<double>(params_->springStiffness) *
                                          static_cast<double>(extra)
                                    : 0.0;
-        if (stretch < kInsertArcCompression) {
+        if (stretch < kRemoveArcCompression) {
             bead.arcBridge = false;
         }
     }

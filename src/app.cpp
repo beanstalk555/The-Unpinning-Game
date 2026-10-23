@@ -902,9 +902,6 @@ namespace
             }
             PinEveryFaceBead();
             BeginUnpinningMatch();
-            if (!physics->MoveActive() && !physics->AutoTightening()) {
-                physics->StartAutoTighten();
-            }
         }
 
         std::unordered_set<int> PhysicsExteriors() const
@@ -1622,17 +1619,25 @@ namespace
             return UnpinningGame::MoveKind::R0;
         }
 
+        void StartUnpinningSession()
+        {
+            ClearR3Undo();
+            dropdownOpen = false;
+            tuningUI.open = false;
+            showLabels = false;
+            game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
+            if (physics && !physics->MoveActive() && !physics->AutoTightening()) {
+                physics->StartAutoTighten();
+            }
+        }
+
         void BeginUnpinningMatch()
         {
             if (!layout || !necklace) {
                 return;
             }
             RememberGameStart();
-            ClearR3Undo();
-            dropdownOpen = false;
-            tuningUI.open = false;
-            showLabels = false;
-            game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
+            StartUnpinningSession();
             pendingGameFit = true;
         }
 
@@ -1640,11 +1645,7 @@ namespace
         {
             RestoreGameStart();
             PinEveryFaceBead();
-            ClearR3Undo();
-            dropdownOpen = false;
-            tuningUI.open = false;
-            showLabels = false;
-            game.Begin(sigmaBox.text, InfiniteRegionText(), DescribeStartingPins());
+            StartUnpinningSession();
             RequestViewFit();
         }
 
@@ -3433,7 +3434,7 @@ namespace
                 app.GenerateRandom();
             }
             x += 56.0f + 8.0f;
-            const std::string facesText = "regions (>50 may cause performance issues).";
+            const std::string facesText = "regions.";
             DrawTextS(facesText, x, row0 + 6.0f, 18.0f, labelColor);
             x += TextWidth(facesText, 18.0f) + 30.0f;
 
