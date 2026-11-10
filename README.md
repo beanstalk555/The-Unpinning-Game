@@ -32,7 +32,7 @@ The game always ends with the loop becoming completely untangled. There is a ver
 
 ### No draws
 
-One feature worth noting is that if the unpinning game is played on a loop with an odd number of crossings, it will never result in a draw.
+If the unpinning game is played on a loop with an odd number of crossings, it will never result in a draw.
 
 ### Implementation features
 
@@ -40,6 +40,7 @@ The implementation features:
 
 - A custom physics engine for tightening and settling
 - Dynamic performance of Reidemeister moves
+- Support for multiloops (multi-strand loops)
 - The permutation representation as the primary data structure for storing and manipulating multiloops
 
 It also features a sandbox with random multiloop generation and drawing, with dedicated options for one-strand and simple cases. Pins can be added and removed freely, the multiloop can be dragged with left click, and regions can be highlighted with right click. From here the game can be played with "unconventional" settings including on multiloops with more than one strand, or with pins in only some regions.
