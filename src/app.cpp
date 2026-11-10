@@ -661,6 +661,7 @@ namespace
         bool debug = false;
         bool showBeads = false;
         bool showLabels = true;
+        bool showCrossingLabels = false;
         bool highlightReidemeister = false;
         bool showDebugTiming = true;
         bool showDebugExcessAreas = false;
@@ -2312,8 +2313,7 @@ namespace
     // Drawing the multiloop.
     // ----------------------------------------------------------------
 
-    // Half-edge label near a crossing, kept within a box of side cell/3
-    // centered on the crossing.
+    // Half-edge label beside the strand, midway from the crossing to the next edge bead.
     void DrawHalfEdgeLabel(Vector2 vertex, Vector2 towards, int halfEdge, float cell)
     {
         Vector2 dir = {towards.x - vertex.x, towards.y - vertex.y};
@@ -2325,27 +2325,13 @@ namespace
         const Vector2 perp = {dir.y, -dir.x};
 
         const std::string text = std::to_string(halfEdge);
-        const float boxHalf = cell / 4.5f;
-        float fontSize = Clampf(cell * 0.15f, 7.0f, 16.0f);
-        float textWidth = TextWidth(text, fontSize);
-        if (textWidth + 4.0f > 2.0f * boxHalf) {
-            fontSize = std::max(6.0f, fontSize * (2.0f * boxHalf - 4.0f) / (textWidth + 4.0f));
-            textWidth = TextWidth(text, fontSize);
-        }
+        const float fontSize = Clampf(cell * 0.225f, 10.5f, 24.0f);
+        const float textWidth = TextWidth(text, fontSize);
 
-        Vector2 pos = {vertex.x + dir.x * cell * 0.17f + perp.x * cell * 0.11f,
-                       vertex.y + dir.y * cell * 0.17f + perp.y * cell * 0.11f};
+        const Vector2 pos = {(vertex.x + towards.x) * 0.5f + perp.x * cell * 0.11f,
+                             (vertex.y + towards.y) * 0.5f + perp.y * cell * 0.11f};
         const float halfW = textWidth / 2.0f + 2.0f;
         const float halfH = fontSize / 2.0f + 1.0f;
-        if (boxHalf > halfW) {
-            pos.x = Clampf(pos.x, vertex.x - boxHalf + halfW, vertex.x + boxHalf - halfW);
-        }
-        else {
-            pos.x = vertex.x + dir.x * (boxHalf - halfW);
-        }
-        if (boxHalf > halfH) {
-            pos.y = Clampf(pos.y, vertex.y - boxHalf + halfH, vertex.y + boxHalf - halfH);
-        }
 
         DrawRectangle(static_cast<int>(pos.x - halfW), static_cast<int>(pos.y - halfH),
                       static_cast<int>(2.0f * halfW), static_cast<int>(2.0f * halfH),
@@ -3195,7 +3181,7 @@ namespace
             drawArcBridge(bead, StrandColor(0));
         }
 
-        if (app.debug) {
+        if (app.debug || app.showCrossingLabels) {
             // Vertex permutation: half-edge labels at each crossing bead.
             for (const Bead& bead : necklace.beads) {
                 if (!bead.isVertex) {
@@ -3556,6 +3542,7 @@ namespace
             rx += TextWidth(strandText, 18.0f) + 16.0f;
         }
         rx += checkbox(rx, row2, "show labels", &app.showLabels, !drawing) + 16.0f;
+        rx += checkbox(rx, row2, "crossing labels", &app.showCrossingLabels, !drawing) + 16.0f;
         rx += checkbox(rx, row2, "show beads", &app.showBeads, !drawing) + 16.0f;
 #ifdef DEBUG_UI
         rx += checkbox(rx, row2, "debug", &app.debug, !drawing) + 16.0f;
